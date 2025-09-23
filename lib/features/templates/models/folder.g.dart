@@ -1,35 +1,41 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
 
-part of 'template_field.dart';
+part of 'folder.dart';
 
 // **************************************************************************
 // TypeAdapterGenerator
 // **************************************************************************
 
-class TemplateFieldAdapter extends TypeAdapter<TemplateField> {
+class FolderAdapter extends TypeAdapter<Folder> {
   @override
-  final int typeId = 2;
+  final int typeId = 3;
 
   @override
-  TemplateField read(BinaryReader reader) {
+  Folder read(BinaryReader reader) {
     final numOfFields = reader.readByte();
     final fields = <int, dynamic>{
       for (int i = 0; i < numOfFields; i++) reader.readByte(): reader.read(),
     };
-    return TemplateField(
-      id: fields[0] as String,
+    return Folder(
+      id: fields[0] as String?,
       name: fields[1] as String,
+      parentId: fields[2] as String?,
+      childrenIds: (fields[3] as List?)?.cast<String>(),
     );
   }
 
   @override
-  void write(BinaryWriter writer, TemplateField obj) {
+  void write(BinaryWriter writer, Folder obj) {
     writer
-      ..writeByte(2)
+      ..writeByte(4)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
-      ..write(obj.name);
+      ..write(obj.name)
+      ..writeByte(2)
+      ..write(obj.parentId)
+      ..writeByte(3)
+      ..write(obj.childrenIds);
   }
 
   @override
@@ -38,7 +44,7 @@ class TemplateFieldAdapter extends TypeAdapter<TemplateField> {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is TemplateFieldAdapter &&
+      other is FolderAdapter &&
           runtimeType == other.runtimeType &&
           typeId == other.typeId;
 }

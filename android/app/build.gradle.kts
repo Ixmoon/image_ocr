@@ -48,11 +48,10 @@ android {
         }
     }
 }
+
 dependencies {
-    // ... (可能已经存在的其他依赖项，如 implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:...") )
-    
-    // --- [添加这一行] ---
-    implementation("com.google.mlkit:text-recognition-chinese:16.0.0")
+    // ML Kit中文文本识别模型
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 }
 
 flutter {

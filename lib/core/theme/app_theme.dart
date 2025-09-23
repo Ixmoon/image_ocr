@@ -15,7 +15,7 @@ class AppTheme {
     subThemesData: const FlexSubThemesData(
       blendOnLevel: 10,
       blendOnColors: false,
-      useTextTheme: true,
+      useMaterial3Typography: true,
       useM2StyleDividerInM3: true,
       // 为FAB、按钮等组件配置圆角
       defaultRadius: 16.0,
@@ -32,7 +32,7 @@ class AppTheme {
     blendLevel: 13,
     subThemesData: const FlexSubThemesData(
       blendOnLevel: 20,
-      useTextTheme: true,
+      useMaterial3Typography: true,
       useM2StyleDividerInM3: true,
       defaultRadius: 16.0,
     ),

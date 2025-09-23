@@ -5,9 +5,25 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:saver_gallery/saver_gallery.dart';
 
+import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+
 class PreviewScreen extends StatelessWidget {
   final String imagePath;
-  const PreviewScreen({super.key, required this.imagePath});
+  final bool canReplace;
+
+  const PreviewScreen({
+    super.key,
+    required this.imagePath,
+    this.canReplace = false,
+  });
+
+  Future<void> _replaceImage(BuildContext context) async {
+    final pickedFile = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (pickedFile != null && context.mounted) {
+      context.pop(pickedFile.path);
+    }
+  }
 
   Future<void> _saveToGallery(BuildContext context) async {
     // 请求更精确的 photos 权限
@@ -67,7 +83,7 @@ class PreviewScreen extends StatelessWidget {
               icon: const Icon(Icons.arrow_back),
               color: Colors.white,
               style: IconButton.styleFrom(
-                backgroundColor: Colors.black.withOpacity(0.3),
+                backgroundColor: Colors.black.withAlpha((255 * 0.3).round()),
               ),
               onPressed: () => Navigator.of(context).pop(),
             ),
@@ -80,6 +96,12 @@ class PreviewScreen extends StatelessWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
+            if (canReplace)
+              TextButton.icon(
+                icon: const Icon(Icons.flip_camera_ios_outlined),
+                label: const Text('替换图片'),
+                onPressed: () => _replaceImage(context),
+              ),
             TextButton.icon(
               icon: const Icon(Icons.share_outlined),
               label: const Text('分享'),

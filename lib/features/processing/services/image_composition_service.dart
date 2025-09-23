@@ -1,10 +1,7 @@
 import 'dart:typed_data';
 import 'package:flutter/painting.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as img;
-import 'package:image_clone_tool/features/templates/models/template_field.dart';
-import 'package:fuzzywuzzy/fuzzywuzzy.dart' as fuzzy;
 
 // 图像合成服务
 class ImageCompositionService {

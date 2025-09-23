@@ -1,20 +1,44 @@
-// lib/features/processing/screens/batch_preview_screen.dart
-import 'dart:io'; // <--- [FIX] 修正了这里的导入语句 (dart.io -> dart:io)
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:image_clone_tool/core/router/app_router.dart';
+import 'package:image_ocr/core/router/app_router.dart';
+import 'package:image_ocr/features/processing/models/image_processing_state.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:saver_gallery/saver_gallery.dart';
 
-class BatchPreviewScreen extends StatelessWidget {
-  final List<String> resultImagePaths;
-  const BatchPreviewScreen({super.key, required this.resultImagePaths});
+class BatchPreviewScreen extends StatefulWidget {
+  final ImageProcessingState processingState;
+  const BatchPreviewScreen({super.key, required this.processingState});
+
+  @override
+  State<BatchPreviewScreen> createState() => _BatchPreviewScreenState();
+}
+
+class _BatchPreviewScreenState extends State<BatchPreviewScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // 使用 addPostFrameCallback 确保在 build 完成后显示 SnackBar
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (widget.processingState.failedPaths.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${widget.processingState.failedPaths.length} 张图片处理失败。'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    });
+  }
 
   Future<void> _saveAllToGallery(BuildContext context) async {
-    // 请求更精确的 photos 权限
+    final resultImagePaths = widget.processingState.results;
+    if (resultImagePaths.isEmpty) return;
+
     final status = await Permission.photos.request();
     if (status.isGranted || status.isLimited) {
       int successCount = 0;
+      if (!context.mounted) return;
       showDialog(
         context: context,
         barrierDismissible: false,
@@ -48,6 +72,7 @@ class BatchPreviewScreen extends StatelessWidget {
       if (!context.mounted) return;
       Navigator.of(context).pop();
 
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('$successCount / ${resultImagePaths.length} 张图片已保存到相册')),
       );
@@ -61,6 +86,7 @@ class BatchPreviewScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final resultImagePaths = widget.processingState.results;
     return Scaffold(
       appBar: AppBar(
         title: Text('处理结果 (${resultImagePaths.length})'),
@@ -76,15 +102,22 @@ class BatchPreviewScreen extends StatelessWidget {
       ),
       body: resultImagePaths.isEmpty
           ? const Center(
-              child: Text('没有成功处理的图片'),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.error_outline, color: Colors.orange, size: 60),
+                  SizedBox(height: 16),
+                  Text('没有成功处理的图片'),
+                ],
+              ),
             )
           : GridView.builder(
               padding: const EdgeInsets.all(8.0),
               gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2, // 每行2个，使其更“竖直”
+                crossAxisCount: 2,
                 crossAxisSpacing: 8,
                 mainAxisSpacing: 8,
-                childAspectRatio: 9 / 16, // 强制为竖直长方形
+                childAspectRatio: 9 / 16,
               ),
               itemCount: resultImagePaths.length,
               itemBuilder: (context, index) {
@@ -105,14 +138,13 @@ class _ResultGridItem extends StatelessWidget {
       borderRadius: BorderRadius.circular(12.0),
       child: GestureDetector(
         onTap: () {
-          // 跳转到功能更全的预览页
           context.push(AppRouter.previewPath, extra: imagePath);
         },
         child: Container(
-          color: Colors.black.withOpacity(0.1),
+          color: Colors.black.withAlpha((255 * 0.1).round()),
           child: Image.file(
             File(imagePath),
-            fit: BoxFit.contain, // 确保图片完整显示不拉伸
+            fit: BoxFit.contain,
             frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
               if (wasSynchronouslyLoaded) return child;
               return AnimatedOpacity(

@@ -2,104 +2,120 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:image_clone_tool/core/router/app_router.dart';
-import 'package:image_clone_tool/features/processing/models/image_processing_state.dart';
-import 'package:image_clone_tool/features/processing/providers/image_processing_provider.dart';
-import 'package:image_clone_tool/features/templates/models/template.dart';
+import 'package:image_ocr/core/router/app_router.dart';
+import 'package:image_ocr/features/processing/models/image_processing_state.dart';
+import 'package:image_ocr/features/processing/providers/image_processing_provider.dart';
+import 'package:image_ocr/features/templates/models/folder.dart';
+import 'package:image_ocr/features/templates/models/template.dart';
+import 'package:image_ocr/features/templates/providers/template_providers.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-// 应用模板到目标图片的屏幕，支持批量处理
 class ApplyTemplateScreen extends ConsumerStatefulWidget {
-  final Template template;
-  const ApplyTemplateScreen({super.key, required this.template});
+  final Template? initialTemplate;
+  const ApplyTemplateScreen({super.key, this.initialTemplate});
 
   @override
   ConsumerState<ApplyTemplateScreen> createState() => _ApplyTemplateScreenState();
 }
 
 class _ApplyTemplateScreenState extends ConsumerState<ApplyTemplateScreen> {
-  // 修复：使用final，并通过setState创建新列表来更新
+  late List<Template> _selectedTemplates;
   List<String> _targetImagePaths = [];
 
+  @override
+  void initState() {
+    super.initState();
+    _selectedTemplates = widget.initialTemplate != null ? [widget.initialTemplate!] : [];
+  }
+
   Future<void> _pickMultipleImages() async {
-    // 1. 请求权限
     final status = await Permission.photos.request();
     if (!status.isGranted && !status.isLimited) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('需要相册权限才能选择图片')),
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('需要相册权限')));
       return;
     }
-
-    final picker = ImagePicker();
-    final pickedFiles = await picker.pickMultiImage();
+    final pickedFiles = await ImagePicker().pickMultiImage();
     setState(() {
-      _targetImagePaths = [
-        ..._targetImagePaths,
-        ...pickedFiles.map((file) => file.path)
-      ];
+      _targetImagePaths = [..._targetImagePaths, ...pickedFiles.map((f) => f.path)];
     });
   }
 
-  void _removeImage(int index) {
-    setState(() {
-      // 创建一个移除了指定项的新列表
-      _targetImagePaths = List.from(_targetImagePaths)..removeAt(index);
-    });
+  Future<void> _addTemplates() async {
+    final newlySelected = await showDialog<List<Template>>(
+      context: context,
+      builder: (context) => _NavigableTemplateSelectionDialog(
+        alreadySelectedIds: _selectedTemplates.map((t) => t.id).toSet(),
+      ),
+    );
+
+    if (newlySelected != null && newlySelected.isNotEmpty) {
+      setState(() {
+        _selectedTemplates.addAll(newlySelected);
+      });
+    }
   }
 
   void _startProcessing() {
-    if (_targetImagePaths.isEmpty) return;
+    if (_targetImagePaths.isEmpty || _selectedTemplates.isEmpty) return;
     ref.read(imageProcessingProvider.notifier).processBatch(
-          template: widget.template,
+          templates: _selectedTemplates,
           targetImagePaths: _targetImagePaths,
         );
   }
 
   @override
   Widget build(BuildContext context) {
-    // 监听图像处理的状态，用于显示进度和处理结果
     ref.listen<ImageProcessingState>(imageProcessingProvider, (previous, next) {
-      // 当处理完成时，跳转到批量预览页面
       if (previous?.isProcessing == true && !next.isProcessing) {
-        // 使用pushReplacement避免在预览页返回时回到处理页面
-        context.pushReplacement(AppRouter.batchPreviewPath, extra: next.results);
-      }
-      // 如果处理出错，显示错误提示
-      if (next.error != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('处理失败: ${next.error}')),
-        );
+        if (next.results.isNotEmpty || next.failedPaths.isNotEmpty) {
+          context.pushReplacement(AppRouter.batchPreviewPath, extra: next);
+        }
       }
     });
 
     final processingState = ref.watch(imageProcessingProvider);
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text('应用模板: ${widget.template.name}'),
-      ),
+      appBar: AppBar(title: const Text('应用模板')),
       body: Column(
         children: [
           Expanded(
-            child: _targetImagePaths.isEmpty
-                ? _EmptyImagePicker(onPressed: _pickMultipleImages)
-                : _ImageGrid(
-                    imagePaths: _targetImagePaths,
-                    onRemove: _removeImage,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // --- 左侧: 模板列表 ---
+                Expanded(
+                  child: _TemplatePanel(
+                    templates: _selectedTemplates,
+                    onRemove: (index) => setState(() => _selectedTemplates.removeAt(index)),
+                    onReorder: (oldIndex, newIndex) {
+                      setState(() {
+                        if (newIndex > oldIndex) newIndex -= 1;
+                        final item = _selectedTemplates.removeAt(oldIndex);
+                        _selectedTemplates.insert(newIndex, item);
+                      });
+                    },
                   ),
+                ),
+                const VerticalDivider(width: 1),
+                // --- 右侧: 目标图片 ---
+                Expanded(
+                  child: _TargetImagePanel(
+                    imagePaths: _targetImagePaths,
+                    onRemove: (index) => setState(() => _targetImagePaths.removeAt(index)),
+                  ),
+                ),
+              ],
+            ),
           ),
-          // 底部处理按钮和进度显示
           if (processingState.isProcessing)
-            const _ProcessingIndicator()
+            _ProcessingIndicator()
           else
             _ActionFooter(
-              onAdd: _pickMultipleImages,
-              onProcess: _targetImagePaths.isNotEmpty ? _startProcessing : null,
-              imageCount: _targetImagePaths.length,
+              onAddImages: _pickMultipleImages,
+              onAddTemplates: _addTemplates,
+              onProcess: _targetImagePaths.isNotEmpty && _selectedTemplates.isNotEmpty ? _startProcessing : null,
             ),
         ],
       ),
@@ -107,116 +123,146 @@ class _ApplyTemplateScreenState extends ConsumerState<ApplyTemplateScreen> {
   }
 }
 
-// 空状态下的图片选择提示
-class _EmptyImagePicker extends StatelessWidget {
-  final VoidCallback onPressed;
-  const _EmptyImagePicker({required this.onPressed});
+// --- Panels ---
 
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.image_search, size: 80, color: Theme.of(context).colorScheme.secondary),
-          const SizedBox(height: 16),
-          Text('选择目标图片', style: Theme.of(context).textTheme.headlineSmall),
-          const SizedBox(height: 8),
-          const Text('添加一张或多张图片以应用模板'),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            icon: const Icon(Icons.add_photo_alternate_outlined),
-            label: const Text('选择图片'),
-            onPressed: onPressed,
-          ),
-        ],
-      ),
-    );
-  }
-}
+class _TemplatePanel extends StatelessWidget {
+  final List<Template> templates;
+  final void Function(int) onRemove;
+  final void Function(int, int) onReorder;
 
-// 显示已选图片网格的组件
-class _ImageGrid extends StatelessWidget {
-  final List<String> imagePaths;
-  final ValueChanged<int> onRemove;
-  const _ImageGrid({required this.imagePaths, required this.onRemove});
-
-  @override
-  Widget build(BuildContext context) {
-    return GridView.builder(
-      padding: const EdgeInsets.all(8.0),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        crossAxisSpacing: 8,
-        mainAxisSpacing: 8,
-      ),
-      itemCount: imagePaths.length,
-      itemBuilder: (context, index) {
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(12.0),
-          child: GridTile(
-            header: Align(
-              alignment: Alignment.topRight,
-              child: GestureDetector(
-                onTap: () => onRemove(index),
-                child: Container(
-                  margin: const EdgeInsets.all(4.0),
-                  decoration: const BoxDecoration(
-                    color: Colors.black54,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.close, color: Colors.white, size: 18),
-                ),
-              ),
-            ),
-            child: GestureDetector(
-              onTap: () => context.push(AppRouter.previewPath, extra: imagePaths[index]),
-              child: Container(
-                color: Colors.black.withOpacity(0.1),
-                child: Image.file(
-                  File(imagePaths[index]),
-                  fit: BoxFit.contain, // 确保图片完整显示不拉伸
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-// 底部操作栏
-class _ActionFooter extends StatelessWidget {
-  final VoidCallback onAdd;
-  final VoidCallback? onProcess;
-  final int imageCount;
-
-  const _ActionFooter({
-    required this.onAdd,
-    required this.onProcess,
-    required this.imageCount,
+  const _TemplatePanel({
+    required this.templates,
+    required this.onRemove,
+    required this.onReorder,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Row(
-        children: [
-          OutlinedButton(
-            onPressed: onAdd,
-            child: const Icon(Icons.add_photo_alternate_outlined),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Text('模板', style: Theme.of(context).textTheme.titleLarge),
+        ),
+        Expanded(
+          child: ReorderableListView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 16.0),
+            itemCount: templates.length,
+            itemBuilder: (context, index) {
+              final template = templates[index];
+              return _TemplateTag(
+                key: ValueKey(template.id),
+                template: template,
+                onRemove: () => onRemove(index),
+              );
+            },
+            onReorder: onReorder,
           ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: FilledButton.icon(
-              icon: const Icon(Icons.play_arrow_outlined),
-              label: Text('开始处理 ($imageCount)'),
-              style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 12),
+        ),
+      ],
+    );
+  }
+}
+
+class _TargetImagePanel extends StatelessWidget {
+  final List<String> imagePaths;
+  final void Function(int) onRemove;
+
+  const _TargetImagePanel({required this.imagePaths, required this.onRemove});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Text('目标图片', style: Theme.of(context).textTheme.titleLarge),
+        ),
+        Expanded(
+          child: imagePaths.isEmpty
+              ? const Center(child: Text('请添加目标图片'))
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                  itemCount: imagePaths.length,
+                  itemBuilder: (context, index) {
+                    return _ImagePreviewItem(
+                      path: imagePaths[index],
+                      onRemove: () => onRemove(index),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+// --- UI Components ---
+
+class _TemplateTag extends StatelessWidget {
+  final Template template;
+  final VoidCallback onRemove;
+
+  const _TemplateTag({super.key, required this.template, required this.onRemove});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8.0),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(template.name, style: Theme.of(context).textTheme.titleMedium),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: onRemove,
+              tooltip: '移除模板',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ImagePreviewItem extends StatelessWidget {
+  final String path;
+  final VoidCallback onRemove;
+
+  const _ImagePreviewItem({required this.path, required this.onRemove});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8.0),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          GestureDetector(
+            onTap: () => context.push(AppRouter.previewPath, extra: path),
+            child: AspectRatio(
+              aspectRatio: 0.5, // 严格遵循 1:2 的宽高比
+              child: Image.file(
+                File(path),
+                fit: BoxFit.cover,
               ),
-              onPressed: onProcess,
+            ),
+          ),
+          Positioned(
+            top: 4,
+            right: 4,
+            child: IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: onRemove,
+              style: IconButton.styleFrom(
+                backgroundColor: Colors.black.withAlpha((255 * 0.5).round()),
+                foregroundColor: Colors.white,
+              ),
             ),
           ),
         ],
@@ -225,7 +271,60 @@ class _ActionFooter extends StatelessWidget {
   }
 }
 
-// 处理中进度指示器
+class _ActionFooter extends StatelessWidget {
+  final VoidCallback onAddImages;
+  final VoidCallback onAddTemplates;
+  final VoidCallback? onProcess;
+
+  const _ActionFooter({
+    required this.onAddImages,
+    required this.onAddTemplates,
+    this.onProcess,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(8.0),
+        child: Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                icon: const Icon(Icons.add_photo_alternate_outlined),
+                label: const Text('添加图片'),
+                onPressed: onAddImages,
+                style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: FilledButton.icon(
+                icon: const Icon(Icons.add_task_outlined),
+                label: const Text('添加模板'),
+                onPressed: onAddTemplates,
+                style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: FilledButton.icon(
+                icon: const Icon(Icons.play_arrow_outlined),
+                label: const Text('开始处理'),
+                onPressed: onProcess,
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  backgroundColor: onProcess != null ? Colors.green : null,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ProcessingIndicator extends ConsumerWidget {
   const _ProcessingIndicator();
 
@@ -242,6 +341,112 @@ class _ProcessingIndicator extends ConsumerWidget {
           Text('正在处理 ${state.processedCount} / ${state.totalCount}...'),
         ],
       ),
+    );
+  }
+}
+
+class _NavigableTemplateSelectionDialog extends ConsumerStatefulWidget {
+  final Set<String> alreadySelectedIds;
+  const _NavigableTemplateSelectionDialog({required this.alreadySelectedIds});
+
+  @override
+  ConsumerState<_NavigableTemplateSelectionDialog> createState() => _NavigableTemplateSelectionDialogState();
+}
+
+class _NavigableTemplateSelectionDialogState extends ConsumerState<_NavigableTemplateSelectionDialog> {
+  late final List<String?> _navigationStack;
+  final _selectedTemplatesInDialog = <Template>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _navigationStack = [ref.read(currentFolderIdProvider)];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final currentFolderId = _navigationStack.last;
+    final contentsAsync = ref.watch(folderContentsProvider(currentFolderId));
+    final pathAsync = ref.watch(folderPathProvider);
+
+    return AlertDialog(
+      title: const Text('选择模板'),
+      contentPadding: const EdgeInsets.fromLTRB(0, 20, 0, 24),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              height: 30,
+              child: pathAsync.when(
+                data: (path) => ListView.separated(
+                  padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                  scrollDirection: Axis.horizontal,
+                  itemCount: path.length,
+                  separatorBuilder: (context, index) => const Icon(Icons.chevron_right, color: Colors.grey),
+                  itemBuilder: (context, index) {
+                    final folder = path[index];
+                    return InkWell(
+                      onTap: () => setState(() => _navigationStack.removeRange(index + 1, _navigationStack.length)),
+                      child: Center(child: Text(folder?.name ?? '根目录')),
+                    );
+                  },
+                ),
+                loading: () => const SizedBox.shrink(),
+                error: (e, s) => const SizedBox.shrink(),
+              ),
+            ),
+            const Divider(height: 1),
+            Flexible(
+              child: contentsAsync.when(
+                loading: () => const Center(child: CircularProgressIndicator()),
+                error: (err, stack) => Center(child: Text('加载失败: $err')),
+                data: (contents) {
+                  if (contents.isEmpty) return const Center(child: Text('此文件夹为空'));
+                  return ListView.builder(
+                    itemCount: contents.length,
+                    itemBuilder: (context, index) {
+                      final item = contents[index];
+                      if (item is Folder) {
+                        return ListTile(
+                          leading: const Icon(Icons.folder_outlined),
+                          title: Text(item.name),
+                          onTap: () => setState(() => _navigationStack.add(item.id)),
+                        );
+                      } else if (item is Template) {
+                        final template = item;
+                        final isAlreadySelected = widget.alreadySelectedIds.contains(template.id);
+                        final isSelectedInDialog = _selectedTemplatesInDialog.any((t) => t.id == template.id);
+                        return CheckboxListTile(
+                          title: Text(template.name),
+                          value: isSelectedInDialog,
+                          enabled: !isAlreadySelected,
+                          onChanged: (bool? value) {
+                            if (isAlreadySelected) return;
+                            setState(() {
+                              if (value == true) {
+                                _selectedTemplatesInDialog.add(template);
+                              } else {
+                                _selectedTemplatesInDialog.removeWhere((t) => t.id == template.id);
+                              }
+                            });
+                          },
+                        );
+                      }
+                      return const SizedBox.shrink();
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => context.pop(), child: const Text('取消')),
+        FilledButton(onPressed: () => context.pop(_selectedTemplatesInDialog.toList()), child: const Text('确认添加')),
+      ],
     );
   }
 }

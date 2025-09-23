@@ -21,13 +21,14 @@ class TemplateAdapter extends TypeAdapter<Template> {
       name: fields[1] as String,
       sourceImagePath: fields[2] as String,
       fieldIds: (fields[3] as List).cast<String>(),
+      folderId: fields[4] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, Template obj) {
     writer
-      ..writeByte(4)
+      ..writeByte(5)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -35,7 +36,9 @@ class TemplateAdapter extends TypeAdapter<Template> {
       ..writeByte(2)
       ..write(obj.sourceImagePath)
       ..writeByte(3)
-      ..write(obj.fieldIds);
+      ..write(obj.fieldIds)
+      ..writeByte(4)
+      ..write(obj.folderId);
   }
 
   @override

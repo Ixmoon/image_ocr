@@ -1,13 +1,13 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:image_clone_tool/features/home/screens/home_screen.dart';
-import 'package:image_clone_tool/features/processing/screens/batch_preview_screen.dart';
-import 'package:image_clone_tool/features/processing/screens/preview_screen.dart';
-import 'package:image_clone_tool/features/templates/models/template.dart';
-import 'package:image_clone_tool/features/templates/screens/apply_template_screen.dart';
-import 'package:image_clone_tool/features/templates/screens/create_template_screen.dart';
-import 'package:image_clone_tool/features/templates/screens/define_field_screen.dart';
-import 'package:image_clone_tool/features/templates/models/template_field.dart';
+import 'package:image_ocr/features/home/screens/home_screen.dart';
+import 'package:image_ocr/features/processing/screens/batch_preview_screen.dart';
+import 'package:image_ocr/features/processing/screens/preview_screen.dart';
+import 'package:image_ocr/features/templates/models/template.dart';
+import 'package:image_ocr/features/templates/screens/apply_template_screen.dart';
+import 'package:image_ocr/features/templates/screens/create_template_screen.dart';
+import 'package:image_ocr/features/processing/models/image_processing_state.dart';
 
 // 将GoRouter实例放入Provider中，便于管理和测试
 final routerProvider = Provider<GoRouter>((ref) {
@@ -24,7 +24,6 @@ class AppRouter {
   // 路由路径常量，方便统一管理和引用
   static const String homePath = '/';
   static const String createTemplatePath = '/create-template';
-  static const String defineFieldPath = '/define-field';
   static const String applyTemplatePath = '/apply-template';
   static const String previewPath = '/preview';
   static const String batchPreviewPath = '/batch-preview';
@@ -48,29 +47,32 @@ class AppRouter {
       ]
     ),
     GoRoute(
-      path: defineFieldPath,
-      builder: (context, state) {
-        // 接收从 context.push 传递过来的 extra 参数
-        final fieldToEdit = state.extra as TemplateField?;
-        return DefineFieldScreen(fieldToEdit: fieldToEdit);
-      },
-    ),
-    GoRoute(
       path: applyTemplatePath,
       builder: (context, state) => ApplyTemplateScreen(
-        template: state.extra as Template,
+        initialTemplate: state.extra as Template?,
       ),
     ),
     GoRoute(
       path: previewPath,
-      builder: (context, state) => PreviewScreen(
-        imagePath: state.extra as String,
-      ),
+      builder: (context, state) {
+        if (state.extra is String) {
+          return PreviewScreen(imagePath: state.extra as String);
+        }
+        if (state.extra is Map<String, dynamic>) {
+          final args = state.extra as Map<String, dynamic>;
+          return PreviewScreen(
+            imagePath: args['imagePath'] as String,
+            canReplace: args['canReplace'] as bool? ?? false,
+          );
+        }
+        // Fallback or error case
+        return const Scaffold(body: Center(child: Text('无效的预览参数')));
+      },
     ),
     GoRoute(
       path: batchPreviewPath,
       builder: (context, state) => BatchPreviewScreen(
-        resultImagePaths: state.extra as List<String>,
+        processingState: state.extra as ImageProcessingState,
       ),
     ),
   ];
