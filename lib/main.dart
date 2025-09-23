@@ -45,7 +45,7 @@ class MyApp extends ConsumerWidget {
     final router = ref.watch(routerProvider);
 
     return MaterialApp.router(
-      title: '智能图像值替换工具',
+      title: '图像置换',
       
       // 应用主题配置
       theme: AppTheme.lightTheme,
