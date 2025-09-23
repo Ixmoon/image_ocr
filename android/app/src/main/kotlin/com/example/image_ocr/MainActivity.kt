@@ -1,4 +1,4 @@
-package com.example.image_ocr
+package com.lxmoon.image_ocr
 
 import io.flutter.embedding.android.FlutterActivity
 
