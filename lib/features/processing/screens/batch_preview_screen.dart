@@ -59,7 +59,7 @@ class _BatchPreviewScreenState extends State<BatchPreviewScreen> {
             filePath: path,
             fileName: 'processed_image_${DateTime.now().millisecondsSinceEpoch}_$successCount.png',
             skipIfExists: true,
-            androidRelativePath: "Pictures/ImageCloneTool",
+            androidRelativePath: "Pictures/ImageOCR",
           );
           if (result.isSuccess) {
             successCount++;

@@ -36,7 +36,7 @@ class PreviewScreen extends StatelessWidget {
           filePath: imagePath,
           fileName: 'processed_image_${DateTime.now().millisecondsSinceEpoch}.png',
           skipIfExists: true, // 安全的默认值
-          androidRelativePath: "Pictures/ImageCloneTool",
+          androidRelativePath: "Pictures/ImageOCR",
         );
 
         if (!context.mounted) return;
