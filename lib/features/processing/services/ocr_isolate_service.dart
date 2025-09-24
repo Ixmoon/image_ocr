@@ -75,6 +75,18 @@ Uint8List _applyGrayscaleAndSharpen(img.Image image) {
     }
   }
   
+  // [FIX] Fill the border pixels ---
+  // Copy top and bottom rows from original grayscale
+  for (var x = 0; x < width; x++) {
+    sharpened[x] = grayscale[x]; // Top row
+    sharpened[(height - 1) * width + x] = grayscale[(height - 1) * width + x]; // Bottom row
+  }
+  // Copy left and right columns from original grayscale
+  for (var y = 0; y < height; y++) {
+    sharpened[y * width] = grayscale[y * width]; // Left column
+    sharpened[y * width + width - 1] = grayscale[y * width + width - 1]; // Right column
+  }
+  
   return sharpened;
 }
 
@@ -153,8 +165,15 @@ void ocrIsolateEntryPoint(IsolateStartRequest startRequest) async {
       if (request is IsolateRequest) {
         // --- Handle OCR Request ---
         final imageBytes = File(request.imagePath).readAsBytesSync();
-        final image = img.decodeImage(imageBytes);
+        var image = img.decodeImage(imageBytes);
         if (image == null) throw Exception('Failed to decode image');
+
+        // [FIX] NV21 format requires even dimensions. Crop the image if necessary.
+        if (image.width.isOdd || image.height.isOdd) {
+          final newWidth = image.width.isOdd ? image.width - 1 : image.width;
+          final newHeight = image.height.isOdd ? image.height - 1 : image.height;
+          image = img.copyCrop(image, x: 0, y: 0, width: newWidth, height: newHeight);
+        }
 
         final imageSize = Size(image.width.toDouble(), image.height.toDouble());
         InputImage inputImage;
