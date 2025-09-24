@@ -1,4 +1,7 @@
+import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:image_ocr/features/templates/models/folder.dart';
 import 'package:image_ocr/features/templates/models/template.dart';
@@ -116,8 +119,36 @@ class TemplateCreation extends _$TemplateCreation {
     );
   }
 
-  void loadForEditing(Template template) {
-    state = template;
+  Future<void> loadForEditing(Template template) async {
+    // --- [DATA CORRUPTION FIX] ---
+    // When loading a template for editing, its image path might be a temporary one
+    // from a previous session. We must verify it and copy the image to a safe
+    // location if it's not already there.
+    final appDir = await getApplicationDocumentsDirectory();
+    final imageFile = File(template.sourceImagePath);
+
+    if (!imageFile.existsSync()) {
+      // If the file doesn't even exist, we can't recover.
+      // Set the path to empty to force the user to re-pick an image.
+      state = template.copyWith(sourceImagePath: '');
+      return;
+    }
+
+    if (!path.isWithin(appDir.path, template.sourceImagePath)) {
+      // The file exists but is outside our safe directory (it's a temp file).
+      // Copy it to a permanent location.
+      final fileExtension = path.extension(template.sourceImagePath);
+      final newFileName = '${const Uuid().v4()}$fileExtension';
+      final permanentPath = path.join(appDir.path, newFileName);
+      
+      await imageFile.copy(permanentPath);
+      
+      // Update the state with the new, safe path.
+      state = template.copyWith(sourceImagePath: permanentPath);
+    } else {
+      // The path is already safe, just load it.
+      state = template;
+    }
   }
 
   void updateName(String name) {
@@ -150,8 +181,30 @@ class TemplateCreation extends _$TemplateCreation {
   }
 
   Future<void> save() async {
+    // --- [DATA CORRUPTION FIX] ---
+    // Double-check the image path before saving to ensure it's permanent.
+    // This acts as a safeguard against any logic errors.
+    final appDir = await getApplicationDocumentsDirectory();
+    Template templateToSave = state;
+
+    if (state.sourceImagePath.isNotEmpty && !path.isWithin(appDir.path, state.sourceImagePath)) {
+        final imageFile = File(state.sourceImagePath);
+        if (await imageFile.exists()) {
+            final fileExtension = path.extension(state.sourceImagePath);
+            final newFileName = '${const Uuid().v4()}$fileExtension';
+            final permanentPath = path.join(appDir.path, newFileName);
+            await imageFile.copy(permanentPath);
+            templateToSave = state.copyWith(sourceImagePath: permanentPath);
+        } else {
+            // If the source file doesn't exist, we can't save a broken template.
+            // Throw an exception to notify the user.
+            throw Exception('源图片文件不存在，无法保存模板。请重新选择图片。');
+        }
+    }
+    
     final service = await ref.read(templateServiceProvider.future);
-    await service.saveTemplate(state);
+    await service.saveTemplate(templateToSave);
+    state = templateToSave; // Ensure the in-memory state has the correct path too
     ref.invalidate(folderContentsProvider(state.folderId));
   }
 }

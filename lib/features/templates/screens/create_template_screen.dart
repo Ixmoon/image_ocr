@@ -1,16 +1,19 @@
 import 'dart:io';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_ocr/core/router/app_router.dart';
-import 'package:image_ocr/features/processing/services/ocr_service.dart';
+import 'package:image_ocr/features/processing/services/processing_isolate_pool_service.dart';
 import 'package:image_ocr/features/processing/utils/anchor_finder.dart';
 import 'package:image_ocr/features/templates/models/template_field.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
 import 'package:image_ocr/widgets/interactive_image_viewer.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 
@@ -29,8 +32,10 @@ class CreateTemplateScreen extends ConsumerWidget {
         error: (err, stack) => _ErrorScaffold(title: '编辑模板', error: err),
         data: (template) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
+            final notifier = ref.read(templateCreationProvider.notifier);
+            // Check if the state is already loaded for this template to avoid redundant loads
             if (ref.read(templateCreationProvider).id != template.id) {
-              ref.read(templateCreationProvider.notifier).loadForEditing(template);
+              notifier.loadForEditing(template);
             }
           });
           return const _CreateTemplateView(isEdit: true);
@@ -83,7 +88,17 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
     try {
       final pickedFile = await ImagePicker().pickImage(source: ImageSource.gallery);
       if (pickedFile != null) {
-        ref.read(templateCreationProvider.notifier).setSourceImage(pickedFile.path);
+        // --- [FIX] Copy the temporary image to a permanent location ---
+        final appDir = await getApplicationDocumentsDirectory();
+        final originalFile = File(pickedFile.path);
+        final fileExtension = path.extension(pickedFile.path);
+        final newFileName = '${const Uuid().v4()}$fileExtension';
+        final permanentPath = path.join(appDir.path, newFileName);
+        
+        await originalFile.copy(permanentPath);
+        
+        // Now, use the reliable, permanent path
+        ref.read(templateCreationProvider.notifier).setSourceImage(permanentPath);
       }
     } finally {
       if (mounted) setState(() => _isPickingImage = false);
@@ -92,6 +107,9 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
 
   Future<void> _previewField(String fieldName) async {
     if (fieldName.isEmpty) return;
+
+    final uiStopwatch = Stopwatch()..start();
+    debugPrint('[PERF] UI: _previewField started for "$fieldName".');
 
     setState(() {
       _isOcrLoading = true;
@@ -105,21 +123,33 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
         throw Exception('源图片路径为空');
       }
 
-      // [最终架构] 直接调用已包含预处理的OcrService
-      // [FINAL OPTIMIZATION] Destructure the record to get both results.
-      final (ocrResult, imageSize) = await ref.read(ocrServiceProvider).processImage(sourceImagePath);
+      debugPrint('[PERF] UI: Calling OCR task at ${uiStopwatch.elapsedMilliseconds}ms.');
+      final pool = ref.read(processingIsolatePoolProvider);
+      final ocrResponse = await pool.processOcr(sourceImagePath);
+      debugPrint('[PERF] UI: OCR task returned at ${uiStopwatch.elapsedMilliseconds}ms.');
 
+      if (!ocrResponse.isSuccess) {
+        throw Exception(ocrResponse.error ?? 'Unknown OCR error');
+      }
+      final ocrResult = ocrResponse.data as RecognizedText;
 
       final foundLine = findAnchorLine(ocrResult: ocrResult, searchText: fieldName);
+      debugPrint('[PERF] UI: Anchor finding finished at ${uiStopwatch.elapsedMilliseconds}ms.');
       
       if (foundLine != null) {
-        
-        // [FINAL OPTIMIZATION] Redundant image decoding is now completely removed.
         final labelRect = foundLine.boundingBox;
+        // To get the image size, we need to decode the image.
+        // This is a trade-off for not having it in the OCR response anymore.
+        final imageBytes = await File(sourceImagePath).readAsBytes();
+        final image = img.decodeImage(imageBytes);
+        if (image == null) throw Exception('Failed to decode image for size.');
+        final imageSize = Size(image.width.toDouble(), image.height.toDouble());
+
         final valueRect = findValueRectForAnchorLine(
           anchorLine: foundLine,
           imageSize: imageSize,
         );
+        debugPrint('[PERF] UI: Value rect finding finished at ${uiStopwatch.elapsedMilliseconds}ms.');
 
         setState(() {
           _previewLabelRect = labelRect;
@@ -133,6 +163,8 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('OCR预览失败: $e')));
     } finally {
       if (mounted) setState(() => _isOcrLoading = false);
+      uiStopwatch.stop();
+      debugPrint('[PERF] UI: _previewField finished. Total time: ${uiStopwatch.elapsedMilliseconds}ms.');
     }
   }
 

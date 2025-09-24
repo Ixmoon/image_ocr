@@ -4,7 +4,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:image_ocr/core/router/app_router.dart';
 import 'package:image_ocr/core/theme/app_theme.dart';
 import 'package:image_ocr/core/utils/hive_type_adapters.dart' as custom_adapters;
-import 'package:image_ocr/features/processing/services/ocr_service.dart';
+import 'package:image_ocr/features/processing/services/processing_isolate_pool_service.dart';
 import 'package:image_ocr/features/templates/models/folder.dart';
 import 'package:image_ocr/features/templates/models/template.dart';
 import 'package:image_ocr/features/templates/models/template_field.dart';
@@ -28,18 +28,20 @@ Future<void> main() async {
   await Hive.openBox<Template>('templates');
   await Hive.openBox<TemplateField>('template_fields'); // 为 TemplateField 创建并打开一个新 Box
 
-  // [ULTIMATE OPTIMIZATION] Pre-warm the OCR service on app startup.
+  // --- [PERFORMANCE FIX] ---
+  // Pre-warm the OCR Isolate Pool on app startup.
   final container = ProviderContainer();
-  // 1. Get the service instance. This creates the isolate.
-  final ocrService = container.read(ocrServiceProvider);
-  // 2. Actively warm up the ML Kit engine inside the isolate.
-  await ocrService.warmUp();
+  // 1. Get the service instance, which starts creating the isolates.
+  final pool = container.read(processingIsolatePoolProvider);
+  // 2. Actively warm up each isolate by processing a dummy image.
+  // This ensures the ML models are fully loaded before the first user interaction.
+  await pool.warmUp();
 
   // 运行应用
   runApp(
     // ProviderScope是Riverpod的根Widget，用于存储所有Provider的状态
     ProviderScope(
-      parent: container, // Use the pre-warmed container.
+      parent: container, // Use the container that has been warmed up.
       child: const MyApp(),
     ),
   );
