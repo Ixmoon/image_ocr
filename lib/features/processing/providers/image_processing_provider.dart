@@ -17,6 +17,88 @@ import 'package:image/image.dart' as img;
 
 part 'image_processing_provider.g.dart';
 
+/// A data class to hold all necessary information for processing a single image in an isolate.
+class _CompositionPayload {
+  final List<Template> templates;
+  final String targetImagePath;
+  final RecognizedText targetOcrResult;
+  final Map<String, RecognizedText> templateOcrResults;
+  final Map<String, TemplateField> fieldsMap;
+  final Map<String, Uint8List> templateImageBytes;
+
+  _CompositionPayload({
+    required this.templates,
+    required this.targetImagePath,
+    required this.targetOcrResult,
+    required this.templateOcrResults,
+    required this.fieldsMap,
+    required this.templateImageBytes,
+  });
+}
+
+/// This top-level function runs in a separate isolate to perform CPU-bound work.
+Future<Uint8List> _performCompositionInIsolate(_CompositionPayload payload) async {
+  final compositionService = ImageCompositionService();
+
+  // 1. Decode the target image
+  final targetImageBytes = await File(payload.targetImagePath).readAsBytes();
+  final targetImage = img.decodeImage(targetImageBytes);
+  if (targetImage == null) {
+    throw Exception('Failed to decode target image in isolate: ${payload.targetImagePath}');
+  }
+
+  img.Image currentImage = targetImage;
+
+  // 2. Sequentially apply each template
+  for (final template in payload.templates) {
+    final templateOcrResult = payload.templateOcrResults[template.id]!;
+    final templateImageBytes = payload.templateImageBytes[template.id]!;
+    final templateImage = img.decodeImage(templateImageBytes);
+    if (templateImage == null) {
+      throw Exception('Failed to decode template image in isolate: ${template.name}');
+    }
+
+    for (final fieldId in template.fieldIds) {
+      final field = payload.fieldsMap[fieldId];
+      if (field == null) continue;
+
+      final templateAnchor = findAnchorLine(ocrResult: templateOcrResult, searchText: field.name);
+      if (templateAnchor == null) throw Exception('In template "${template.name}", anchor "${field.name}" not found.');
+
+      final targetAnchor = findAnchorLine(ocrResult: payload.targetOcrResult, searchText: field.name);
+      if (targetAnchor == null) throw Exception('In target image, anchor "${field.name}" not found.');
+
+      final templateValueRect = findValueRectForAnchorLine(
+        anchorLine: templateAnchor,
+        imageSize: Size(templateImage.width.toDouble(), templateImage.height.toDouble()),
+      );
+      final patchImage = img.copyCrop(
+        templateImage,
+        x: templateValueRect.left.toInt(),
+        y: templateValueRect.top.toInt(),
+        width: templateValueRect.width.toInt(),
+        height: templateValueRect.height.toInt(),
+      );
+      final patchImageBytes = Uint8List.fromList(img.encodePng(patchImage));
+
+      final targetValueRect = findValueRectForAnchorLine(
+        anchorLine: targetAnchor,
+        imageSize: Size(targetImage.width.toDouble(), targetImage.height.toDouble()),
+      );
+
+      currentImage = await compositionService.compose(
+        baseImage: currentImage,
+        patchImageBytes: patchImageBytes,
+        targetValueArea: targetValueRect,
+      );
+    }
+  }
+
+  // 3. Encode the final image and return its bytes
+  return Uint8List.fromList(img.encodePng(currentImage));
+}
+
+
 @riverpod
 class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
   @override
@@ -25,11 +107,10 @@ class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
   }
 
   Future<void> processBatch({
-    required List<Template> templates, // 接收模板列表
+    required List<Template> templates,
     required List<String> targetImagePaths,
   }) async {
     ref.read(temporaryFileServiceProvider).clearAll();
-
     state = ImageProcessingState(
       isProcessing: true,
       totalCount: targetImagePaths.length,
@@ -41,125 +122,67 @@ class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
 
     try {
       final ocrService = ref.read(ocrServiceProvider);
-      final compositionService = ref.read(imageCompositionServiceProvider);
       final fieldsBox = Hive.box<TemplateField>('template_fields');
-      final tempFileService = ref.read(temporaryFileServiceProvider); // [修复] 重新添加这行
+      final tempFileService = ref.read(temporaryFileServiceProvider);
 
-      // 1. 并行对所有相关模板进行OCR
-      final templateOcrFutures = templates.map((t) async {
-        // [最终架构] 直接调用OcrService，它内部已包含预处理
-        final ocrResult = await ocrService.processImage(t.sourceImagePath);
-        // 为了合成，我们仍然需要解码模板图片
-        final image = img.decodeImage(await File(t.sourceImagePath).readAsBytes());
-        if (image == null) throw Exception('无法解码模板源图: ${t.name}');
-        return {'id': t.id, 'image': image, 'ocr': ocrResult};
+      // 1. Prepare all data in parallel on the main isolate
+      final allTemplateFieldIds = templates.expand((t) => t.fieldIds).toSet();
+      final fieldsMap = {for (var id in allTemplateFieldIds) id: fieldsBox.get(id)!};
+
+      final templateFutures = templates.map((t) async {
+        final ocr = await ocrService.processImage(t.sourceImagePath);
+        final bytes = await File(t.sourceImagePath).readAsBytes();
+        return {'id': t.id, 'ocr': ocr, 'bytes': bytes};
       }).toList();
-      
-      final templateOcrResults = await Future.wait(templateOcrFutures);
-      // [修正] 显式指定Map类型以解决类型推断问题
-      final templateDataMap = <String, Map<String, dynamic>>{
-        for (var e in templateOcrResults) e['id'] as String: e
-      };
 
-      // 2. 并行处理每一张目标图片
-      final processingFutures = targetImagePaths.map((path) {
-        return _processSingleImage(
+      final targetFutures = targetImagePaths.map((path) async {
+        final ocr = await ocrService.processImage(path);
+        return {'path': path, 'ocr': ocr};
+      }).toList();
+
+      final templateResults = await Future.wait(templateFutures);
+      final targetResults = await Future.wait(targetFutures);
+
+      final templateOcrMap = {for (var r in templateResults) r['id'] as String: r['ocr'] as RecognizedText};
+      final templateBytesMap = {for (var r in templateResults) r['id'] as String: r['bytes'] as Uint8List};
+
+      // 2. Create a payload for each target image
+      final payloads = targetResults.map((targetData) {
+        return _CompositionPayload(
           templates: templates,
-          targetImagePath: path,
-          templateDataMap: templateDataMap,
-          compositionService: compositionService,
-          ocrService: ocrService,
-          fieldsBox: fieldsBox,
-          tempFileService: tempFileService, // [修复] 将其传递给 _processSingleImage
-        ).then((resultPath) {
+          targetImagePath: targetData['path'] as String,
+          targetOcrResult: targetData['ocr'] as RecognizedText,
+          templateOcrResults: templateOcrMap,
+          fieldsMap: fieldsMap,
+          templateImageBytes: templateBytesMap,
+        );
+      }).toList();
+
+      // 3. Offload composition work to isolates
+      final processingFutures = payloads.map((payload) {
+        return compute(_performCompositionInIsolate, payload).then((resultBytes) async {
+          final resultPath = await tempFileService.create('result_', '.png');
+          await File(resultPath).writeAsBytes(resultBytes);
+          
           state = state.copyWith(
             processedCount: state.processedCount + 1,
             results: [...state.results, resultPath],
           );
-          return {'path': path, 'status': 'success'};
         }).catchError((e) {
           state = state.copyWith(
             processedCount: state.processedCount + 1,
-            failedPaths: [...state.failedPaths, path],
+            failedPaths: [...state.failedPaths, payload.targetImagePath],
           );
-          return {'path': path, 'status': 'failure'};
         });
       }).toList();
 
       await Future.wait(processingFutures);
 
     } catch (e) {
-       state = state.copyWith(isProcessing: false, error: e.toString());
-       return;
+      state = state.copyWith(isProcessing: false, error: e.toString());
+      return;
     }
 
     state = state.copyWith(isProcessing: false);
-  }
-
-  Future<String> _processSingleImage({
-    required List<Template> templates,
-    required String targetImagePath,
-    required Map<String, Map<String, dynamic>> templateDataMap,
-    required ImageCompositionService compositionService,
-    required OcrService ocrService,
-    required Box<TemplateField> fieldsBox,
-    required TemporaryFileService tempFileService, // [修复] 在函数签名中接收它
-  }) async {
-    
-    // [最终架构] 直接调用OcrService，它内���已包含预处理
-    final targetOcrResult = await ocrService.processImage(targetImagePath);
-
-    // 为了合成，我们仍然需要解码目标图片
-    final targetImage = img.decodeImage(await File(targetImagePath).readAsBytes());
-    if (targetImage == null) throw Exception('无法解码目标图片');
-
-    img.Image currentImage = targetImage;
-
-    // [核心逻辑] 依次应用每一个模板
-    for (final template in templates) {
-      final templateData = templateDataMap[template.id]!;
-      final templateImage = templateData['image'] as img.Image;
-      final templateOcrResult = templateData['ocr'] as RecognizedText;
-
-      for (final fieldId in template.fieldIds) {
-        final field = fieldsBox.get(fieldId);
-        if (field == null) continue;
-
-        final templateAnchor = findAnchorLine(ocrResult: templateOcrResult, searchText: field.name);
-        if (templateAnchor == null) throw Exception('在模板 "${template.name}" 中找不到锚点 "${field.name}"');
-
-        final targetAnchor = findAnchorLine(ocrResult: targetOcrResult, searchText: field.name);
-        if (targetAnchor == null) throw Exception('在目标图片中找不到锚点 "${field.name}"');
-
-        final templateValueRect = findValueRectForAnchorLine(
-          anchorLine: templateAnchor,
-          imageSize: Size(templateImage.width.toDouble(), templateImage.height.toDouble()),
-        );
-        final patchImage = img.copyCrop(
-          templateImage,
-          x: templateValueRect.left.toInt(),
-          y: templateValueRect.top.toInt(),
-          width: templateValueRect.width.toInt(),
-          height: templateValueRect.height.toInt(),
-        );
-        final patchImageBytes = Uint8List.fromList(img.encodePng(patchImage));
-
-        final targetValueRect = findValueRectForAnchorLine(
-          anchorLine: targetAnchor,
-          imageSize: Size(targetImage.width.toDouble(), targetImage.height.toDouble()),
-        );
-
-        // 基于上一个模板处理的结果，继续合成
-        currentImage = await compositionService.compose(
-          baseImage: currentImage,
-          patchImageBytes: patchImageBytes,
-          targetValueArea: targetValueRect,
-        );
-      }
-    }
-
-    final resultPath = await tempFileService.create('result_', '.png');
-    await File(resultPath).writeAsBytes(img.encodePng(currentImage));
-    return resultPath;
   }
 }

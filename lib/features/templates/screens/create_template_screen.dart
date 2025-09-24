@@ -92,6 +92,7 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
 
   Future<void> _previewField(String fieldName) async {
     if (fieldName.isEmpty) return;
+
     setState(() {
       _isOcrLoading = true;
       _previewLabelRect = null;
@@ -105,18 +106,15 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
       }
 
       // [最终架构] 直接调用已包含预处理的OcrService
-      final ocrResult = await ref.read(ocrServiceProvider).processImage(sourceImagePath);
+      // [FINAL OPTIMIZATION] Destructure the record to get both results.
+      final (ocrResult, imageSize) = await ref.read(ocrServiceProvider).processImage(sourceImagePath);
 
 
       final foundLine = findAnchorLine(ocrResult: ocrResult, searchText: fieldName);
       
       if (foundLine != null) {
         
-        final imageBytes = await File(sourceImagePath).readAsBytes();
-        final image = img.decodeImage(imageBytes);
-        if (image == null) throw Exception('无法解码图片以获取尺寸');
-        final imageSize = Size(image.width.toDouble(), image.height.toDouble());
-
+        // [FINAL OPTIMIZATION] Redundant image decoding is now completely removed.
         final labelRect = foundLine.boundingBox;
         final valueRect = findValueRectForAnchorLine(
           anchorLine: foundLine,
