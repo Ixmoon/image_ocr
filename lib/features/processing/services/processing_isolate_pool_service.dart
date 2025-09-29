@@ -26,33 +26,58 @@ class ProcessingIsolatePoolService {
   final _taskQueue = Queue<_TaskRequest>();
   final Completer<void> _poolReadyCompleter = Completer();
   final List<Isolate> _allIsolates = [];
+  final List<SendPort> _allWorkerPorts = [];
 
   bool _isDisposed = false;
+  bool _isInitialized = false;
+  bool _isInitializing = false;
 
-  /// Initializes the isolate pool on creation.
-  ProcessingIsolatePoolService() {
-    _init();
+  /// Creates the service but delays initialization until needed.
+  ProcessingIsolatePoolService();
+
+  /// Ensures the pool is initialized before use.
+  Future<void> _ensureInitialized() async {
+    if (_isInitialized) return;
+    
+    if (_isInitializing) {
+      await _poolReadyCompleter.future;
+      return;
+    }
+    
+    _isInitializing = true;
+    await _init();
   }
 
-  /// Warms up all worker isolates by processing a dummy image for OCR.
-  /// This forces the ML Kit models to be fully loaded and ready.
-  Future<void> warmUp() async {
-    await _poolReadyCompleter.future;
+  /// Warms up all worker isolates in the background.
+  /// This is completely asynchronous and won't block the main thread.
+  void warmUpAsync() {
+    // Don't wait for this - let it run in background
+    _warmUpInBackground();
+  }
 
-    final tempDir = await getTemporaryDirectory();
-    final dummyImagePath = path.join(tempDir.path, 'warmup.png');
-    final dummyImage = img.Image(width: 32, height: 32);
-    await File(dummyImagePath).writeAsBytes(img.encodePng(dummyImage));
-
-    final warmupFutures = _allIsolates.map((_) => processOcr(dummyImagePath)).toList();
-    
+  Future<void> _warmUpInBackground() async {
     try {
+      await _ensureInitialized();
+      
+      final tempDir = await getTemporaryDirectory();
+      final dummyImagePath = path.join(tempDir.path, 'warmup.png');
+      final dummyImage = img.Image(width: 32, height: 32);
+      await File(dummyImagePath).writeAsBytes(img.encodePng(dummyImage));
+
+      final warmupFutures = _allIsolates.map((_) async {
+        try {
+          final decodeResponse = await dispatch(TaskType.decode, dummyImagePath);
+          if (decodeResponse.isSuccess) {
+            final ocrPayload = OcrPayload(imageBytes: decodeResponse.data, imagePath: dummyImagePath);
+            await dispatch(TaskType.ocr, ocrPayload);
+          }
+        } catch (e) {
+        }
+      }).toList();
+      
       await Future.wait(warmupFutures);
-    } catch (e) {
-      // Log warm-up failure as it might be important
-      debugPrint('[ProcessingPool] Warm-up failed: $e');
-    } finally {
       await File(dummyImagePath).delete();
+    } catch (e) {
     }
   }
 
@@ -77,31 +102,23 @@ class ProcessingIsolatePoolService {
         _allIsolates.add(isolate);
         
         final workerSendPort = await mainReceivePort.first as SendPort;
+        _allWorkerPorts.add(workerSendPort);
         _idleWorkers.add(workerSendPort);
       } catch (e) {
-        debugPrint('[ProcessingPool] Failed to spawn worker isolate: $e');
       }
     }
 
     if (_idleWorkers.isNotEmpty) {
+      _isInitialized = true;
       _poolReadyCompleter.complete();
     } else {
       _poolReadyCompleter.completeError('Failed to initialize any workers.');
     }
   }
 
-  /// Submits an image for OCR processing.
-  Future<ProcessingResponse> processOcr(String imagePath) async {
-    return _submitTask(TaskType.ocr, imagePath);
-  }
-
-  /// Submits a payload for image composition.
-  Future<ProcessingResponse> processComposition(CompositionPayload payload) async {
-    return _submitTask(TaskType.composition, payload);
-  }
-
-  Future<ProcessingResponse> _submitTask(TaskType type, dynamic payload) async {
-    await _poolReadyCompleter.future;
+  /// Submits a task to the isolate pool.
+  Future<ProcessingResponse> dispatch(TaskType type, dynamic payload) async {
+    await _ensureInitialized();
     if (_isDisposed) {
       throw Exception('ProcessingIsolatePoolService has been disposed.');
     }
@@ -109,6 +126,34 @@ class ProcessingIsolatePoolService {
     _taskQueue.add(_TaskRequest(type, payload, completer));
     _dispatch();
     return completer.future;
+  }
+
+  /// Submits a task to ALL worker isolates. Useful for initialization.
+  Future<void> broadcast(TaskType type, dynamic payload) async {
+    await _ensureInitialized();
+    if (_isDisposed) {
+      throw Exception('ProcessingIsolatePoolService has been disposed.');
+    }
+
+    final broadcastFutures = _allWorkerPorts.map((workerPort) {
+      final completer = Completer<ProcessingResponse>();
+      final responsePort = ReceivePort();
+      final requestForWorker = ProcessingRequest(responsePort.sendPort, type, payload);
+      
+      workerPort.send(requestForWorker);
+
+      responsePort.first.then((response) {
+        if (response is ProcessingResponse && response.isSuccess) {
+          completer.complete(response);
+        } else {
+          final error = response is ProcessingResponse ? response.error : 'Unknown broadcast error';
+          completer.completeError(ProcessingResponse.failure(error));
+        }
+      });
+      return completer.future;
+    });
+
+    await Future.wait(broadcastFutures);
   }
 
   void _dispatch() {
@@ -144,6 +189,7 @@ class ProcessingIsolatePoolService {
     }
     _allIsolates.clear();
     _idleWorkers.clear();
+    _allWorkerPorts.clear();
   }
 }
 

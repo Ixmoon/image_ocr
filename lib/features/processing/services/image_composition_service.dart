@@ -7,16 +7,12 @@ import 'package:image/image.dart' as img;
 class ImageCompositionService {
   
   // 执行图像合成的核心方法
-  Future<img.Image> compose({
+  // OPTIMIZED: Directly accept an img.Image object to avoid redundant decode operations.
+  img.Image compose({
     required img.Image baseImage,
-    required Uint8List patchImageBytes,
+    required img.Image patchImage,
     required Rect targetValueArea,
-  }) async {
-    var patchImage = img.decodeImage(patchImageBytes);
-    if (patchImage == null) {
-      return baseImage; // 如果补丁图片解码失败，返回原图
-    }
-
+  }) {
     // compositeImage返回一个新的Image对象，而不是在原地修改
     final newImage = img.compositeImage(
       baseImage,

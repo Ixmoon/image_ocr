@@ -26,10 +26,6 @@ class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
     required List<Template> templates,
     required List<String> targetImagePaths,
   }) async {
-    final totalStopwatch = Stopwatch()..start();
-    final stepStopwatch = Stopwatch();
-    final log = (String step, int elapsed) => debugPrint('[PERF][Main Isolate] $step: ${elapsed}ms');
-
     ref.read(temporaryFileServiceProvider).clearAll();
     state = ImageProcessingState(
       isProcessing: true,
@@ -45,95 +41,81 @@ class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
       final tempFileService = ref.read(temporaryFileServiceProvider);
       final pool = ref.read(processingIsolatePoolProvider);
 
-      // 1. Prepare all data in parallel on the main isolate
-      stepStopwatch.start();
       final allTemplateFieldIds = templates.expand((t) => t.fieldIds).toSet();
-      
-      // [CRITICAL FIX] Sanitize the TemplateField objects from Hive before sending them to an isolate.
-      // [ULTIMATE FIX] Convert all Hive objects to plain, sendable objects.
       final fieldsMap = <String, PlainTemplateField>{};
       for (final id in allTemplateFieldIds) {
         final fieldFromBox = fieldsBox.get(id)!;
         fieldsMap[id] = PlainTemplateField(id: fieldFromBox.id, name: fieldFromBox.name);
       }
-      
       final sanitizedTemplates = templates.map((t) => PlainTemplate(
         id: t.id,
         name: t.name,
         sourceImagePath: t.sourceImagePath,
         fieldIds: List<String>.from(t.fieldIds),
       )).toList();
-      log('1a. Sanitize Hive Objects', stepStopwatch.elapsedMilliseconds);
-      
-      stepStopwatch.reset();
-      stepStopwatch.start();
-      
-      // [REFACTOR] Implement Pipelined Parallelism with a unified pool.
-      // First, process all templates' data, as it's a shared dependency for all subsequent tasks.
-      final templateDataFutures = templates.map((t) async {
-        final ocrResponse = await pool.processOcr(t.sourceImagePath);
-        if (!ocrResponse.isSuccess) throw Exception('Failed to OCR template: ${t.name}');
-        final bytes = await File(t.sourceImagePath).readAsBytes();
-        return {'id': t.id, 'ocr': ocrResponse.data as RecognizedText, 'bytes': bytes};
-      }).toList();
 
-      final templateResults = await Future.wait(templateDataFutures);
-      final templateOcrMap = {for (var r in templateResults) r['id'] as String: r['ocr'] as RecognizedText};
-      final templateBytesMap = {for (var r in templateResults) r['id'] as String: r['bytes'] as Uint8List};
-      log('1b. All Parallel Template OCR & Read', stepStopwatch.elapsedMilliseconds);
+      final allImagePaths = {
+        ...templates.map((t) => t.sourceImagePath),
+        ...targetImagePaths,
+      }.toList();
 
-      stepStopwatch.reset();
-      stepStopwatch.start();
+      final decodeFutures = allImagePaths.map((path) async {
+        final response = await pool.dispatch(TaskType.decode, path);
+        if (!response.isSuccess) throw Exception('Failed to decode image: $path');
+        return MapEntry(path, response.data as Uint8List);
+      });
+      final allDecodedBytes = Map.fromEntries(await Future.wait(decodeFutures));
 
-      // Now, create a complete processing pipeline for each target image.
-      // Each pipeline is a Future that performs OCR, composition, and file saving for one image.
+      final ocrFutures = allImagePaths.map((path) async {
+        final payload = OcrPayload(imageBytes: allDecodedBytes[path]!, imagePath: path);
+        final response = await pool.dispatch(TaskType.ocr, payload);
+        if (!response.isSuccess) throw Exception('Failed to OCR image: $path');
+        final (text, size) = response.data as (RecognizedText, Size);
+        return MapEntry(path, {'ocr': text, 'size': size});
+      });
+      final ocrResultsWithSizes = Map.fromEntries(await Future.wait(ocrFutures));
+      final allOcrResults = ocrResultsWithSizes.map((key, value) => MapEntry(key, value['ocr'] as RecognizedText));
+
+      final initPayload = InitializePayload(
+        templates: sanitizedTemplates,
+        templateOcrResults: {
+          for (var t in templates) t.id: allOcrResults[t.sourceImagePath]!
+        },
+        fieldsMap: fieldsMap,
+        templateImageBytes: {
+          for (var t in templates) t.id: allDecodedBytes[t.sourceImagePath]!
+        },
+      );
+      await pool.broadcast(TaskType.initialize, initPayload);
+
       final processingPipelines = targetImagePaths.map((targetPath) async {
         try {
-          // 1. OCR for the specific target image
-          final targetOcrResponse = await pool.processOcr(targetPath);
-          if (!targetOcrResponse.isSuccess) throw Exception('Failed to OCR target: $targetPath');
-          final targetOcrResult = targetOcrResponse.data as RecognizedText;
-
-          // 2. Create payload for this image
           final payload = CompositionPayload(
-            templates: sanitizedTemplates,
             targetImagePath: targetPath,
-            targetOcrResult: targetOcrResult,
-            templateOcrResults: templateOcrMap,
-            fieldsMap: fieldsMap,
-            templateImageBytes: templateBytesMap,
+            targetImageBytes: allDecodedBytes[targetPath]!,
+            targetOcrResult: allOcrResults[targetPath]!,
           );
 
-          // 3. Offload composition to the same isolate pool
-          final compositionResponse = await pool.processComposition(payload);
+          final compositionResponse = await pool.dispatch(TaskType.composition, payload);
           if (!compositionResponse.isSuccess) throw Exception('Failed to compose image: $targetPath');
           final resultBytes = compositionResponse.data as Uint8List;
-          
-          // 4. Save the result and update state
+
           final resultPath = await tempFileService.create('result_', '.png');
           await File(resultPath).writeAsBytes(resultBytes);
-          
+
           state = state.copyWith(
             processedCount: state.processedCount + 1,
             results: [...state.results, resultPath],
           );
         } catch (e) {
-           state = state.copyWith(
+          state = state.copyWith(
             processedCount: state.processedCount + 1,
             failedPaths: [...state.failedPaths, targetPath],
           );
         }
       }).toList();
 
-      // A single Future.wait to run all pipelines in parallel.
       await Future.wait(processingPipelines);
-      log('2. All Parallel Pipelines', stepStopwatch.elapsedMilliseconds);
-      
-      totalStopwatch.stop();
-      final totalTime = totalStopwatch.elapsedMilliseconds;
-      final avgTime = totalTime / targetImagePaths.length;
-      debugPrint('[PERF][Main Isolate] >>> Total Batch Time: ${totalTime}ms (${avgTime.toStringAsFixed(2)}ms/image) <<<');
-
 
     } catch (e) {
       state = state.copyWith(isProcessing: false, error: e.toString());

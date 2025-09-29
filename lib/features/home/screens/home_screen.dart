@@ -34,6 +34,7 @@
 // This architecture eliminates all gesture and build-context conflicts, providing
 // a stable and reliable solution.
 //
+import 'dart:io';
 import 'package:drag_and_drop_lists/drag_and_drop_lists.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -43,6 +44,12 @@ import 'package:image_ocr/features/templates/models/folder.dart';
 import 'package:image_ocr/features/templates/models/template.dart';
 import 'package:collection/collection.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:path/path.dart' as p;
+import 'package:flutter_overlay_window/flutter_overlay_window.dart';
+
 
 final hoveredFolderIdProvider = StateProvider<String?>((ref) => null);
 final isDraggingProvider = StateProvider<bool>((ref) => false);
@@ -51,11 +58,131 @@ final folderRectsProvider = StateProvider<Map<String, Rect>>((ref) => {});
 
 // --- Main Screen Widget ---
 
-class HomeScreen extends ConsumerWidget {
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  final ImagePicker _picker = ImagePicker();
+
+  Future<void> _takePicture() async {
+    // 1. 检查和请求相机��限
+    final cameraStatus = await Permission.camera.request();
+    if (!cameraStatus.isGranted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('需要相机权限才能拍照')),
+        );
+      }
+      return;
+    }
+
+    // 2. 检查和请求存储权限 (虽然主要用于保存，但最好也检查一下)
+    final storageStatus = await Permission.manageExternalStorage.request();
+     if (!storageStatus.isGranted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('需要文件访问权限才能保存照片')),
+        );
+      }
+      return;
+    }
+
+    try {
+      // 3. 调用相机
+      final XFile? photo = await _picker.pickImage(source: ImageSource.camera);
+      if (photo == null) {
+        debugPrint('[拍照功能] 用户取消了拍照');
+        return;
+      }
+
+      // 4. 确定保存路径
+      final Directory? externalDir = await getExternalStorageDirectory();
+      if (externalDir == null) {
+        throw Exception("无法访问外部存储");
+      }
+      final String rootPath = externalDir.path.split('/Android').first;
+      final String saveDirPath = p.join(rootPath, 'Pictures', 'ImageOCR');
+      final Directory saveDir = Directory(saveDirPath);
+
+      if (!await saveDir.exists()) {
+        await saveDir.create(recursive: true);
+        debugPrint('[拍照功能] 创建保存目录: $saveDirPath');
+      }
+
+      // 5. 保存文件
+      final String fileName = 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final String newPath = p.join(saveDirPath, fileName);
+      await photo.saveTo(newPath);
+      
+      debugPrint('[拍照功能] 照片已保存至: $newPath');
+
+      // 6. 用户反馈
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('照片已保存至 Pictures/ImageOCR')),
+        );
+      }
+
+    } catch (e) {
+      debugPrint('[拍照功能] 发生错误: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('保存照片失败: $e'),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _showOverlay() async {
+    try {
+      final bool? isGranted = await FlutterOverlayWindow.isPermissionGranted();
+      if (isGranted != true) {
+        final bool? success = await FlutterOverlayWindow.requestPermission();
+        if (success != true) {
+          debugPrint('[悬浮窗] 用户拒绝了悬浮窗权限');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('需要悬浮窗权限才能使用此功能')),
+            );
+          }
+          return;
+        }
+      }
+
+      debugPrint('[悬浮窗] 开始显示悬浮窗...');
+      
+      if (await FlutterOverlayWindow.isActive()) return;
+      
+      await FlutterOverlayWindow.showOverlay(
+        enableDrag: true,
+        overlayTitle: "截屏悬浮窗",
+        overlayContent: '正在运行...',
+        flag: OverlayFlag.defaultFlag,
+        visibility: NotificationVisibility.visibilityPublic,
+        height: 60,
+        width: 60,
+        startPosition: const OverlayPosition(50, 200),
+      );
+      debugPrint('[悬浮窗] 悬浮窗显示完成');
+    } catch (e) {
+      debugPrint('[悬浮窗] 显示悬浮窗时发生错误: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('启动悬浮窗失败: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final navigationStack = ref.watch(folderNavigationStackProvider);
     final currentFolderId = navigationStack.last;
     final contentsAsyncValue = ref.watch(folderContentsProvider(currentFolderId));
@@ -164,6 +291,20 @@ class HomeScreen extends ConsumerWidget {
       floatingActionButton: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          FloatingActionButton.extended(
+            heroTag: 'screenshot_fab',
+            onPressed: _showOverlay,
+            icon: const Icon(Icons.screenshot_monitor),
+            label: const Text('截屏悬浮窗'),
+          ),
+          const SizedBox(height: 16),
+          FloatingActionButton.extended(
+            heroTag: 'take_picture_fab',
+            onPressed: _takePicture,
+            icon: const Icon(Icons.camera_alt_outlined),
+            label: const Text('拍照'),
+          ),
+          const SizedBox(height: 16),
           FloatingActionButton.extended(
             heroTag: 'apply_template_fab',
             onPressed: () => context.push(AppRouter.applyTemplatePath),

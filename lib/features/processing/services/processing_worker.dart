@@ -12,13 +12,13 @@ import 'package:image_ocr/features/processing/utils/anchor_finder.dart';
 // --- Data Structures for Isolate Communication ---
 
 /// Defines the type of task for the worker isolate.
-enum TaskType { ocr, composition }
+enum TaskType { initialize, decode, ocr, composition }
 
 /// A generic request sent from the main isolate to a worker isolate.
 class ProcessingRequest {
   final SendPort sendPort;
   final TaskType taskType;
-  final dynamic payload; // Can be String for OCR path or CompositionPayload
+  final dynamic payload;
 
   ProcessingRequest(this.sendPort, this.taskType, this.payload);
 }
@@ -26,7 +26,7 @@ class ProcessingRequest {
 /// A generic response sent from a worker isolate back to the main isolate.
 class ProcessingResponse {
   final bool isSuccess;
-  final dynamic data; // Can be RecognizedText or Uint8List
+  final dynamic data;
   final String? error;
 
   ProcessingResponse.success(this.data)
@@ -60,21 +60,37 @@ class PlainTemplate {
 }
 
 /// Data needed for the composition task, using only sendable plain objects.
-class CompositionPayload {
+class OcrPayload {
+  final Uint8List imageBytes;
+  final String imagePath; // Used as a key
+
+  OcrPayload({required this.imageBytes, required this.imagePath});
+}
+
+/// Data needed for the one-time initialization of a worker.
+class InitializePayload {
   final List<PlainTemplate> templates;
-  final String targetImagePath;
-  final RecognizedText targetOcrResult;
   final Map<String, RecognizedText> templateOcrResults;
   final Map<String, PlainTemplateField> fieldsMap;
   final Map<String, Uint8List> templateImageBytes;
 
-  CompositionPayload({
+  InitializePayload({
     required this.templates,
-    required this.targetImagePath,
-    required this.targetOcrResult,
     required this.templateOcrResults,
     required this.fieldsMap,
     required this.templateImageBytes,
+  });
+}
+
+class CompositionPayload {
+  final Uint8List targetImageBytes;
+  final String targetImagePath; // Used as a key
+  final RecognizedText targetOcrResult;
+
+  CompositionPayload({
+    required this.targetImageBytes,
+    required this.targetImagePath,
+    required this.targetOcrResult,
   });
 }
 
@@ -92,19 +108,36 @@ void processingWorkerEntryPoint(Map<String, dynamic> context) async {
 
   final textRecognizer = TextRecognizer(script: TextRecognitionScript.chinese);
 
+  // Enhanced cache to hold pre-decoded image objects
+  _WorkerCache? _cache;
+
   await for (final dynamic message in workerReceivePort) {
     if (message is ProcessingRequest) {
       try {
         dynamic result;
-        if (message.taskType == TaskType.ocr) {
-          result = await _performOcr(textRecognizer, message.payload as String);
-        } else if (message.taskType == TaskType.composition) {
-          result = await _performComposition(message.payload as CompositionPayload);
+        switch (message.taskType) {
+          case TaskType.initialize:
+            _cache = _WorkerCache.create(message.payload as InitializePayload);
+            result = true;
+            break;
+          case TaskType.decode:
+            result = await _performDecode(message.payload as String);
+            break;
+          case TaskType.ocr:
+            result = await _performOcr(textRecognizer, message.payload as OcrPayload);
+            break;
+          case TaskType.composition:
+            if (_cache == null) {
+              throw StateError('Worker has not been initialized with template data.');
+            }
+            result = await _performComposition(
+              message.payload as CompositionPayload,
+              _cache!,
+            );
+            break;
         }
         message.sendPort.send(ProcessingResponse.success(result));
-      } catch (e) {
-        // Still log the error in the worker as it's critical for debugging if something goes wrong.
-        debugPrint('[Worker] Task failed: $e');
+      } catch (e, s) {
         message.sendPort.send(ProcessingResponse.failure(e.toString()));
       }
     }
@@ -113,62 +146,183 @@ void processingWorkerEntryPoint(Map<String, dynamic> context) async {
   textRecognizer.close();
 }
 
-/// Performs text recognition on a given image path.
-Future<RecognizedText> _performOcr(TextRecognizer textRecognizer, String imagePath) async {
-  final inputImage = InputImage.fromFilePath(imagePath);
+// --- Image Processing Helpers from original ocr_isolate_service.dart ---
+
+Uint8List _applyGrayscaleAndSharpen(img.Image image, int width, int height) {
+  final grayscale = Uint8List(width * height);
+  final sharpened = Uint8List(width * height);
+
+  for (var y = 0; y < height; y++) {
+    for (var x = 0; x < width; x++) {
+      final pixel = image.getPixel(x, y);
+      final r = pixel.r.toInt();
+      final g = pixel.g.toInt();
+      final b = pixel.b.toInt();
+      grayscale[y * width + x] = (0.299 * r + 0.587 * g + 0.114 * b).round().clamp(0, 255);
+    }
+  }
+
+  for (var y = 1; y < height - 1; y++) {
+    for (var x = 1; x < width - 1; x++) {
+      final p0 = grayscale[(y - 1) * width + x];
+      final p1 = grayscale[y * width + x - 1];
+      final p2 = grayscale[y * width + x];
+      final p3 = grayscale[y * width + x + 1];
+      final p4 = grayscale[(y + 1) * width + x];
+      final newValue = (5 * p2) - p0 - p1 - p3 - p4;
+      sharpened[y * width + x] = newValue.clamp(0, 255);
+    }
+  }
+
+  for (var x = 0; x < width; x++) {
+    sharpened[x] = grayscale[x];
+    sharpened[(height - 1) * width + x] = grayscale[(height - 1) * width + x];
+  }
+  for (var y = 0; y < height; y++) {
+    sharpened[y * width] = grayscale[y * width];
+    sharpened[y * width + width - 1] = grayscale[y * width + width - 1];
+  }
+  
+  return sharpened;
+}
+
+Uint8List _convertRgbToNv21WithPrecomputedLuma(img.Image image, Uint8List luma, int width, int height) {
+  final frameSize = width * height;
+  final yuv420sp = Uint8List(frameSize + (width * height ~/ 2));
+
+  yuv420sp.setRange(0, frameSize, luma);
+
+  int uvIndex = frameSize;
+  for (int j = 0; j < height / 2; j++) {
+    for (int i = 0; i < width / 2; i++) {
+      final x = i * 2;
+      final y = j * 2;
+      final p1 = image.getPixel(x, y);
+      final p2 = image.getPixel(x + 1, y);
+      final p3 = image.getPixel(x, y + 1);
+      final p4 = image.getPixel(x + 1, y + 1);
+      final r = (p1.r + p2.r + p3.r + p4.r) / 4;
+      final g = (p1.g + p2.g + p3.g + p4.g) / 4;
+      final b = (p1.b + p2.b + p3.b + p4.b) / 4;
+      final u = -0.169 * r - 0.331 * g + 0.5 * b + 128;
+      final v = 0.5 * r - 0.419 * g - 0.081 * b + 128;
+      yuv420sp[uvIndex++] = v.toInt().clamp(0, 255);
+      yuv420sp[uvIndex++] = u.toInt().clamp(0, 255);
+    }
+  }
+
+  return yuv420sp;
+}
+
+
+/// Decodes an image from a file path into raw bytes.
+Future<Uint8List> _performDecode(String imagePath) async {
+  final imageBytes = await File(imagePath).readAsBytes();
+  // Here we are just returning the raw file bytes. The actual decoding to pixels
+  // will happen in the OCR and Composition tasks from this byte buffer.
+  // This ensures I/O is done only once.
+  return imageBytes;
+}
+
+/// Performs text recognition on raw image bytes, applying platform-specific optimizations.
+/// Returns both the OCR result and the original image size.
+Future<(RecognizedText, Size)> _performOcr(TextRecognizer textRecognizer, OcrPayload payload) async {
+  final image = img.decodeImage(payload.imageBytes);
+  if (image == null) throw Exception('Failed to decode image: ${payload.imagePath}');
+
+  InputImage inputImage;
+  final imageSize = Size(image.width.toDouble(), image.height.toDouble());
+
+  if (Platform.isAndroid) {
+    // Use the highly optimized NV21 conversion path for Android.
+    final evenWidth = image.width.isOdd ? image.width - 1 : image.width;
+    final evenHeight = image.height.isOdd ? image.height - 1 : image.height;
+
+    final sharpenedLuma = _applyGrayscaleAndSharpen(image, evenWidth, evenHeight);
+    final nv21Bytes = _convertRgbToNv21WithPrecomputedLuma(image, sharpenedLuma, evenWidth, evenHeight);
+    
+    inputImage = InputImage.fromBytes(
+      bytes: nv21Bytes,
+      metadata: InputImageMetadata(
+        size: Size(evenWidth.toDouble(), evenHeight.toDouble()),
+        rotation: InputImageRotation.rotation0deg,
+        format: InputImageFormat.nv21,
+        bytesPerRow: evenWidth,
+      ),
+    );
+  } else {
+    // Use BGRA8888 for other platforms (e.g., iOS).
+    // OPTIMIZED: Get bytes directly without unnecessary copy
+    final bgraBytes = image.getBytes(order: img.ChannelOrder.bgra);
+    inputImage = InputImage.fromBytes(
+      bytes: bgraBytes,
+      metadata: InputImageMetadata(
+        size: imageSize,
+        rotation: InputImageRotation.rotation0deg,
+        format: InputImageFormat.bgra8888,
+        bytesPerRow: image.width * 4,
+      ),
+    );
+  }
+
   final recognizedText = await textRecognizer.processImage(inputImage);
-  return recognizedText;
+  return (recognizedText, imageSize);
 }
 
 /// Performs image composition based on the provided payload.
-Future<Uint8List> _performComposition(CompositionPayload payload) async {
-  final totalStopwatch = Stopwatch()..start();
-  final stepStopwatch = Stopwatch();
-  final imageId = payload.targetImagePath.split('/').last;
-  final log = (String step, int elapsed) => debugPrint('[PERF][Isolate for $imageId] $step: ${elapsed}ms');
+/// Holds all the pre-processed and cached data for a worker isolate.
+class _WorkerCache {
+  final InitializePayload initPayload;
+  final Map<String, img.Image> decodedTemplateImages;
 
+  _WorkerCache({
+    required this.initPayload,
+    required this.decodedTemplateImages,
+  });
+
+  static _WorkerCache create(InitializePayload payload) {
+    final decodedImages = <String, img.Image>{};
+    for (final entry in payload.templateImageBytes.entries) {
+      // OPTIMIZED: Decode directly on the worker isolate, avoid compute() overhead.
+      final image = img.decodeImage(entry.value);
+      if (image != null) {
+        decodedImages[entry.key] = image;
+      }
+    }
+    return _WorkerCache(initPayload: payload, decodedTemplateImages: decodedImages);
+  }
+}
+
+Future<Uint8List> _performComposition(
+  CompositionPayload payload,
+  _WorkerCache cache,
+) async {
   final compositionService = ImageCompositionService();
 
-  // 1. Decode the target image
-  stepStopwatch.start();
-  final targetImageBytes = await File(payload.targetImagePath).readAsBytes();
-  final targetImage = img.decodeImage(targetImageBytes);
+  final targetImage = img.decodeImage(payload.targetImageBytes);
   if (targetImage == null) {
     throw Exception('Failed to decode target image in isolate: ${payload.targetImagePath}');
   }
-  log('1. Decode Target Image', stepStopwatch.elapsedMilliseconds);
-  
+
   img.Image currentImage = targetImage;
 
-  // 2. Sequentially apply each template
-  for (final template in payload.templates) {
-    stepStopwatch.reset();
-    stepStopwatch.start();
-    final templateOcrResult = payload.templateOcrResults[template.id]!;
-    final templateImageBytes = payload.templateImageBytes[template.id]!;
-    final templateImage = img.decodeImage(templateImageBytes);
+  for (final template in cache.initPayload.templates) {
+    final templateOcrResult = cache.initPayload.templateOcrResults[template.id]!;
+    final templateImage = cache.decodedTemplateImages[template.id];
     if (templateImage == null) {
-      throw Exception('Failed to decode template image in isolate: ${template.name}');
+      throw Exception('Failed to find pre-decoded template image in cache: ${template.name}');
     }
-    log('2a. Decode Template "${template.name}"', stepStopwatch.elapsedMilliseconds);
 
     for (final fieldId in template.fieldIds) {
-      final field = payload.fieldsMap[fieldId];
+      final field = cache.initPayload.fieldsMap[fieldId];
       if (field == null) continue;
 
-      stepStopwatch.reset();
-      stepStopwatch.start();
       final templateAnchor = findAnchorLine(ocrResult: templateOcrResult, searchText: field.name);
       final targetAnchor = findAnchorLine(ocrResult: payload.targetOcrResult, searchText: field.name);
       if (templateAnchor == null || targetAnchor == null) {
-        // Gracefully skip if anchor is not found, instead of throwing an exception
-        debugPrint('Anchor for "${field.name}" not found. Skipping field.');
         continue;
       }
-      log('2b. Find Anchors for "${field.name}"', stepStopwatch.elapsedMilliseconds);
-      
-      stepStopwatch.reset();
-      stepStopwatch.start();
+
       final templateValueRect = findValueRectForAnchorLine(
         anchorLine: templateAnchor,
         imageSize: Size(templateImage.width.toDouble(), templateImage.height.toDouble()),
@@ -180,32 +334,19 @@ Future<Uint8List> _performComposition(CompositionPayload payload) async {
         width: templateValueRect.width.toInt(),
         height: templateValueRect.height.toInt(),
       );
-      final patchImageBytes = Uint8List.fromList(img.encodePng(patchImage));
-      log('2c. Crop Patch for "${field.name}"', stepStopwatch.elapsedMilliseconds);
 
-      stepStopwatch.reset();
-      stepStopwatch.start();
       final targetValueRect = findValueRectForAnchorLine(
         anchorLine: targetAnchor,
         imageSize: Size(targetImage.width.toDouble(), targetImage.height.toDouble()),
       );
-      currentImage = await compositionService.compose(
+      currentImage = compositionService.compose(
         baseImage: currentImage,
-        patchImageBytes: patchImageBytes,
+        patchImage: patchImage,
         targetValueArea: targetValueRect,
       );
-      log('2d. Compose Patch for "${field.name}"', stepStopwatch.elapsedMilliseconds);
     }
   }
 
-  // 3. Encode the final image and return its bytes
-  stepStopwatch.reset();
-  stepStopwatch.start();
   final result = Uint8List.fromList(img.encodePng(currentImage));
-  log('3. Encode Final Image', stepStopwatch.elapsedMilliseconds);
-  
-  totalStopwatch.stop();
-  debugPrint('[PERF][Isolate for $imageId] >>> Total Composition Time: ${totalStopwatch.elapsedMilliseconds}ms <<<');
-  
   return result;
 }

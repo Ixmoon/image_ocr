@@ -8,8 +8,9 @@ import 'package:image_ocr/features/processing/providers/image_processing_provide
 import 'package:image_ocr/features/templates/models/folder.dart';
 import 'package:image_ocr/features/templates/models/template.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:photo_manager/photo_manager.dart';
+import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 
 class ApplyTemplateScreen extends ConsumerStatefulWidget {
   final Template? initialTemplate;
@@ -21,7 +22,7 @@ class ApplyTemplateScreen extends ConsumerStatefulWidget {
 
 class _ApplyTemplateScreenState extends ConsumerState<ApplyTemplateScreen> {
   late List<Template> _selectedTemplates;
-  List<String> _targetImagePaths = [];
+  List<AssetEntity> _targetAssets = [];
 
   @override
   void initState() {
@@ -31,14 +32,24 @@ class _ApplyTemplateScreenState extends ConsumerState<ApplyTemplateScreen> {
 
   Future<void> _pickMultipleImages() async {
     final status = await Permission.photos.request();
-    if (!status.isGranted && !status.isLimited) {
+    if (!status.isGranted) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('需要相册权限')));
       return;
     }
-    final pickedFiles = await ImagePicker().pickMultiImage();
-    setState(() {
-      _targetImagePaths = [..._targetImagePaths, ...pickedFiles.map((f) => f.path)];
-    });
+
+    final selectedAssets = await showDialog<List<AssetEntity>>(
+      context: context,
+      builder: (context) => const _AssetPicker(),
+    );
+
+    if (selectedAssets != null) {
+      setState(() {
+        _targetAssets.addAll(selectedAssets);
+        // 去重
+        final ids = _targetAssets.map((e) => e.id).toSet();
+        _targetAssets.retainWhere((e) => ids.remove(e.id));
+      });
+    }
   }
 
   Future<void> _addTemplates() async {
@@ -56,11 +67,21 @@ class _ApplyTemplateScreenState extends ConsumerState<ApplyTemplateScreen> {
     }
   }
 
-  void _startProcessing() {
-    if (_targetImagePaths.isEmpty || _selectedTemplates.isEmpty) return;
+  Future<void> _startProcessing() async {
+    if (_targetAssets.isEmpty || _selectedTemplates.isEmpty) return;
+
+    // 从 AssetEntity 获取文件路径
+    final files = await Future.wait(_targetAssets.map((asset) => asset.file));
+    final paths = files.where((file) => file != null).map((file) => file!.path).toList();
+    
+    if (paths.isEmpty) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('无法获取图片文件')));
+      return;
+    }
+
     ref.read(imageProcessingProvider.notifier).processBatch(
           templates: _selectedTemplates,
-          targetImagePaths: _targetImagePaths,
+          targetImagePaths: paths,
         );
   }
 
@@ -68,6 +89,9 @@ class _ApplyTemplateScreenState extends ConsumerState<ApplyTemplateScreen> {
   Widget build(BuildContext context) {
     ref.listen<ImageProcessingState>(imageProcessingProvider, (previous, next) {
       if (previous?.isProcessing == true && !next.isProcessing) {
+        // 处理完成后，删除已成功处理的目标图片
+        _deleteProcessedOriginals(next);
+
         if (next.results.isNotEmpty || next.failedPaths.isNotEmpty) {
           context.pushReplacement(AppRouter.batchPreviewPath, extra: next);
         }
@@ -102,8 +126,8 @@ class _ApplyTemplateScreenState extends ConsumerState<ApplyTemplateScreen> {
                 // --- 右侧: 目标图片 ---
                 Expanded(
                   child: _TargetImagePanel(
-                    imagePaths: _targetImagePaths,
-                    onRemove: (index) => setState(() => _targetImagePaths.removeAt(index)),
+                    assets: _targetAssets,
+                    onRemove: (index) => setState(() => _targetAssets.removeAt(index)),
                   ),
                 ),
               ],
@@ -115,11 +139,66 @@ class _ApplyTemplateScreenState extends ConsumerState<ApplyTemplateScreen> {
             _ActionFooter(
               onAddImages: _pickMultipleImages,
               onAddTemplates: _addTemplates,
-              onProcess: _targetImagePaths.isNotEmpty && _selectedTemplates.isNotEmpty ? _startProcessing : null,
+              onProcess: _targetAssets.isNotEmpty && _selectedTemplates.isNotEmpty ? _startProcessing : null,
             ),
         ],
       ),
     );
+  }
+
+  /// 删除处理成功的原始图片
+  Future<void> _deleteProcessedOriginals(ImageProcessingState processingState) async {
+    debugPrint('[原始图片清理] 开始清理已处理的原始图片...');
+    
+    final List<AssetEntity> successfulAssets = [];
+    for (final asset in _targetAssets) {
+      final file = await asset.file;
+      if (file != null && !processingState.failedPaths.contains(file.path)) {
+        successfulAssets.add(asset);
+      }
+    }
+
+    if (successfulAssets.isEmpty) {
+      debugPrint('[原始图片清理] 没有成功处理的图片，无需清理。');
+      return;
+    }
+
+    // 请求 "所有文件访问权限"
+    final status = await Permission.manageExternalStorage.request();
+    if (!status.isGranted) {
+      debugPrint('[原始图片清理] 未授予 "所有文件访问权限"，无法直接删除原始图片。');
+      return;
+    }
+
+    debugPrint('[原始图片清理] 准备直接删除 ${successfulAssets.length} 张原始图片文件...');
+    int deletedCount = 0;
+    List<String> deletedAssetIds = [];
+
+    for (final asset in successfulAssets) {
+      try {
+        // 获取真实文件路径
+        final file = await asset.file;
+        if (file != null && await file.exists()) {
+          await file.delete();
+          deletedCount++;
+          deletedAssetIds.add(asset.id);
+          debugPrint('[原始图片清理] 成功删除文件: ${file.path}');
+        } else {
+          debugPrint('[原始图片清理] 文件不存在或无法访问，跳过删除: ${asset.id}');
+        }
+      } catch (e) {
+        debugPrint('[原始图片清理] 删除文件失败 ${asset.id}: $e');
+      }
+    }
+
+    debugPrint('[原始图片清理] 清理完成，共删除了 $deletedCount / ${successfulAssets.length} 个文件。');
+
+    // 清理UI
+    if (mounted) {
+      setState(() {
+        _targetAssets.removeWhere((asset) => deletedAssetIds.contains(asset.id));
+      });
+    }
   }
 }
 
@@ -166,10 +245,10 @@ class _TemplatePanel extends StatelessWidget {
 }
 
 class _TargetImagePanel extends StatelessWidget {
-  final List<String> imagePaths;
+  final List<AssetEntity> assets;
   final void Function(int) onRemove;
 
-  const _TargetImagePanel({required this.imagePaths, required this.onRemove});
+  const _TargetImagePanel({required this.assets, required this.onRemove});
 
   @override
   Widget build(BuildContext context) {
@@ -181,14 +260,14 @@ class _TargetImagePanel extends StatelessWidget {
           child: Text('目标图片', style: Theme.of(context).textTheme.titleLarge),
         ),
         Expanded(
-          child: imagePaths.isEmpty
+          child: assets.isEmpty
               ? const Center(child: Text('请添加目标图片'))
               : ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                  itemCount: imagePaths.length,
+                  itemCount: assets.length,
                   itemBuilder: (context, index) {
                     return _ImagePreviewItem(
-                      path: imagePaths[index],
+                      asset: assets[index],
                       onRemove: () => onRemove(index),
                     );
                   },
@@ -231,10 +310,10 @@ class _TemplateTag extends StatelessWidget {
 }
 
 class _ImagePreviewItem extends StatelessWidget {
-  final String path;
+  final AssetEntity asset;
   final VoidCallback onRemove;
 
-  const _ImagePreviewItem({required this.path, required this.onRemove});
+  const _ImagePreviewItem({required this.asset, required this.onRemove});
 
   @override
   Widget build(BuildContext context) {
@@ -244,11 +323,17 @@ class _ImagePreviewItem extends StatelessWidget {
       child: Stack(
         children: [
           GestureDetector(
-            onTap: () => context.push(AppRouter.previewPath, extra: path),
+            onTap: () async {
+              final file = await asset.file;
+              if (file != null && context.mounted) {
+                context.push(AppRouter.previewPath, extra: file.path);
+              }
+            },
             child: AspectRatio(
               aspectRatio: 0.5, // 严格遵循 1:2 的宽高比
-              child: Image.file(
-                File(path),
+              child: AssetEntityImage(
+                asset,
+                isOriginal: false,
                 fit: BoxFit.cover,
               ),
             ),
@@ -446,6 +531,99 @@ class _NavigableTemplateSelectionDialogState extends ConsumerState<_NavigableTem
       actions: [
         TextButton(onPressed: () => context.pop(), child: const Text('取消')),
         FilledButton(onPressed: () => context.pop(_selectedTemplatesInDialog.toList()), child: const Text('确认添加')),
+      ],
+    );
+  }
+}
+
+// --- Custom Asset Picker Dialog ---
+
+class _AssetPicker extends StatefulWidget {
+  const _AssetPicker();
+
+  @override
+  State<_AssetPicker> createState() => _AssetPickerState();
+}
+
+class _AssetPickerState extends State<_AssetPicker> {
+  List<AssetEntity> _assets = [];
+  final Set<AssetEntity> _selectedAssets = {};
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchAssets();
+  }
+
+  Future<void> _fetchAssets() async {
+    final albums = await PhotoManager.getAssetPathList(type: RequestType.image);
+    if (albums.isEmpty) {
+      setState(() => _isLoading = false);
+      return;
+    }
+    final recentAlbum = albums.first;
+    final assets = await recentAlbum.getAssetListPaged(page: 0, size: 100);
+    setState(() {
+      _assets = assets;
+      _isLoading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('选择图片'),
+      contentPadding: const EdgeInsets.fromLTRB(0, 20, 0, 24),
+      content: SizedBox(
+        width: double.maxFinite,
+        height: 500,
+        child: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _assets.isEmpty
+                ? const Center(child: Text('相册中没有图片'))
+                : GridView.builder(
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 4,
+                      mainAxisSpacing: 4,
+                    ),
+                    itemCount: _assets.length,
+                    itemBuilder: (context, index) {
+                      final asset = _assets[index];
+                      final isSelected = _selectedAssets.contains(asset);
+                      return GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            if (isSelected) {
+                              _selectedAssets.remove(asset);
+                            } else {
+                              _selectedAssets.add(asset);
+                            }
+                          });
+                        },
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            AssetEntityImage(
+                              asset,
+                              isOriginal: false,
+                              fit: BoxFit.cover,
+                            ),
+                            if (isSelected)
+                              Container(
+                                color: Colors.black.withOpacity(0.5),
+                                child: const Icon(Icons.check_circle, color: Colors.white),
+                              ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('取消')),
+        FilledButton(onPressed: () => Navigator.of(context).pop(_selectedAssets.toList()), child: const Text('确认')),
       ],
     );
   }

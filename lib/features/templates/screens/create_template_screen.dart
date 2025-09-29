@@ -7,6 +7,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_ocr/core/router/app_router.dart';
 import 'package:image_ocr/features/processing/services/processing_isolate_pool_service.dart';
+import 'package:image_ocr/features/processing/services/processing_worker.dart';
 import 'package:image_ocr/features/processing/utils/anchor_finder.dart';
 import 'package:image_ocr/features/templates/models/template_field.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
@@ -108,8 +109,6 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
   Future<void> _previewField(String fieldName) async {
     if (fieldName.isEmpty) return;
 
-    final uiStopwatch = Stopwatch()..start();
-    debugPrint('[PERF] UI: _previewField started for "$fieldName".');
 
     setState(() {
       _isOcrLoading = true;
@@ -123,33 +122,30 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
         throw Exception('源图片路径为空');
       }
 
-      debugPrint('[PERF] UI: Calling OCR task at ${uiStopwatch.elapsedMilliseconds}ms.');
       final pool = ref.read(processingIsolatePoolProvider);
-      final ocrResponse = await pool.processOcr(sourceImagePath);
-      debugPrint('[PERF] UI: OCR task returned at ${uiStopwatch.elapsedMilliseconds}ms.');
+      
+      // New two-step process using the generic dispatch
+      final decodeResponse = await pool.dispatch(TaskType.decode, sourceImagePath);
+      if (!decodeResponse.isSuccess) throw Exception(decodeResponse.error ?? 'Decode failed');
+      
+      final ocrPayload = OcrPayload(imageBytes: decodeResponse.data, imagePath: sourceImagePath);
+      final ocrResponse = await pool.dispatch(TaskType.ocr, ocrPayload);
 
       if (!ocrResponse.isSuccess) {
         throw Exception(ocrResponse.error ?? 'Unknown OCR error');
       }
-      final ocrResult = ocrResponse.data as RecognizedText;
+      // Destructure the tuple (RecognizedText, Size) from the response
+      final (ocrResult, imageSize) = ocrResponse.data as (RecognizedText, Size);
 
       final foundLine = findAnchorLine(ocrResult: ocrResult, searchText: fieldName);
-      debugPrint('[PERF] UI: Anchor finding finished at ${uiStopwatch.elapsedMilliseconds}ms.');
       
       if (foundLine != null) {
         final labelRect = foundLine.boundingBox;
-        // To get the image size, we need to decode the image.
-        // This is a trade-off for not having it in the OCR response anymore.
-        final imageBytes = await File(sourceImagePath).readAsBytes();
-        final image = img.decodeImage(imageBytes);
-        if (image == null) throw Exception('Failed to decode image for size.');
-        final imageSize = Size(image.width.toDouble(), image.height.toDouble());
-
+        // We now get the imageSize directly from the OCR response, no need to re-decode.
         final valueRect = findValueRectForAnchorLine(
           anchorLine: foundLine,
           imageSize: imageSize,
         );
-        debugPrint('[PERF] UI: Value rect finding finished at ${uiStopwatch.elapsedMilliseconds}ms.');
 
         setState(() {
           _previewLabelRect = labelRect;
@@ -163,8 +159,6 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('OCR预览失败: $e')));
     } finally {
       if (mounted) setState(() => _isOcrLoading = false);
-      uiStopwatch.stop();
-      debugPrint('[PERF] UI: _previewField finished. Total time: ${uiStopwatch.elapsedMilliseconds}ms.');
     }
   }
 
