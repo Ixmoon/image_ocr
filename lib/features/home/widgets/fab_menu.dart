@@ -3,8 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_ocr/core/router/app_router.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
-import 'package:image_ocr/main.dart'; // Import to access isRootGrantedProvider
 
+import 'package:image_ocr/main.dart';
 // Provider to manage the FAB menu's open/closed state.
 final isFabMenuOpenProvider = StateProvider<bool>((ref) => true);
 
@@ -61,7 +61,7 @@ class FabMenu extends ConsumerWidget {
             heroTag: 'screenshot_fab',
           ),
           const SizedBox(height: 12),
-          // --- [NEW] Root Status/Request FAB Action ---
+          // --- [NEW] Root Permission FAB Action ---
           Consumer(
             builder: (context, ref, child) {
               final isRootGranted = ref.watch(isRootGrantedProvider);
@@ -71,7 +71,7 @@ class FabMenu extends ConsumerWidget {
                   isRootGranted ? Icons.check_circle : Icons.security,
                   color: isRootGranted ? Colors.green : null,
                 ),
-                onPressed: isRootGranted ? () {} : onRequestRoot, // Only allow request if not granted
+                onPressed: isRootGranted ? () {} : onRequestRoot,
                 heroTag: 'root_fab',
               );
             },

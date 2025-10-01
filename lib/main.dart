@@ -43,9 +43,6 @@ final overlayStateToRestoreProvider = StateProvider<OverlayState>((ref) => Overl
 // --- [NEW] 应用生命周期状态管理 ---
 final appLifecycleStateProvider = StateProvider<AppLifecycleState>((ref) => AppLifecycleState.resumed);
 
-// --- [NEW] Root权限状态管理 ---
-final isRootGrantedProvider = StateProvider<bool>((ref) => false);
-
 // --- [NEW] 后台截屏结果缓存 ---
 class PendingScreenshotResult {
   final String? path;
@@ -55,6 +52,9 @@ class PendingScreenshotResult {
   PendingScreenshotResult({this.path, this.error, required this.timestamp});
 }
 final pendingScreenshotResultProvider = StateProvider<PendingScreenshotResult?>((ref) => null);
+
+// --- [NEW] Root权限状态管理 ---
+final isRootGrantedProvider = StateProvider<bool>((ref) => false);
 
 Future<void> main() async {
   // 1. 确保Flutter绑定已初始化
@@ -138,6 +138,9 @@ void _setupIsolateCommunication(ProviderContainer container) {
         }
         
         // Directly trigger the screenshot from here.
+        _screenshotMethodChannel.invokeMethod('takeScreenshot');
+      } else if (command == 'trigger_screenshot_direct') {
+        // 悬浮窗直接触发截屏的请求
         _screenshotMethodChannel.invokeMethod('takeScreenshot');
       }
     }

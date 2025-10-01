@@ -30,13 +30,15 @@ import android.media.MediaScannerConnection
 import android.provider.MediaStore
 import android.content.ContentValues
 import android.net.Uri
+import java.io.BufferedReader
+import java.io.DataOutputStream
+import java.io.InputStreamReader
 
 class ScreenshotService : AccessibilityService() {
 
     companion object {
         const val ACTION_SCREENSHOT_RESULT = "com.lxmoon.image_ocr.SCREENSHOT_RESULT"
         const val ACTION_RECONNECT = "com.lxmoon.image_ocr.RECONNECT"
-        const val ACTION_TRIGGER_SCREENSHOT = "com.lxmoon.image_ocr.TRIGGER_SCREENSHOT" // 新增 Action
         const val EXTRA_FILE_PATH = "extra_file_path"
         const val EXTRA_ERROR_MESSAGE = "extra_error_message"
         
@@ -78,20 +80,12 @@ class ScreenshotService : AccessibilityService() {
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            // 当 MainActivity 请求重连时
-            ACTION_RECONNECT -> {
-                reconnect()
-                //Log.d("ScreenshotService", "Reconnected via onStartCommand")
-            }
-            // 当接收到截图指令时
-            ACTION_TRIGGER_SCREENSHOT -> {
-                handleScreenshotRequest()
-                //Log.d("ScreenshotService", "Screenshot triggered via Intent Action")
-            }
+        // 当 MainActivity 请求重连时，会发送带这个 Action 的 Intent
+        if (intent?.action == ACTION_RECONNECT) {
+            reconnect()
+            //Log.d("ScreenshotService", "Reconnected via onStartCommand")
         }
-        // 使用 START_STICKY 确保服务在被杀死后能自动重启
-        return START_STICKY
+        return super.onStartCommand(intent, flags, startId)
     }
 
     /**
@@ -120,13 +114,12 @@ class ScreenshotService : AccessibilityService() {
         
         // 增加一个延迟，等待悬浮窗UI完成动画或隐藏
         handler.postDelayed({
-            // [NEW] 优先使用 Root 截图
             if (isRootAvailable()) {
                 captureScreenshotWithRoot()
             } else {
-                captureScreenshotWithAccessibility()
+                captureScreenshot()
             }
-        }, 200) // 200毫秒延迟，优化响应速度
+        }, 200) // 200毫秒延迟
     }
     
     /**
@@ -176,21 +169,35 @@ class ScreenshotService : AccessibilityService() {
 
     private fun sendResult(filePath: String?, errorMessage: String?) {
         try {
-            // [最终修复] 移除对 EventSink 的所有直接引用，只使用 LocalBroadcastManager。
-            // 这是保证 Service 和 Activity 彻底解耦的关键。
-            //Log.d("ScreenshotService", "Sending result via LocalBroadcast only.")
-            val intent = Intent(ACTION_SCREENSHOT_RESULT).apply {
-                putExtra(EXTRA_FILE_PATH, filePath)
-                putExtra(EXTRA_ERROR_MESSAGE, errorMessage)
+            // 优先通过 EventChannel 发送结果，这是与 Flutter 主 Isolate 通信的最高效方式
+            val eventSink = MainActivity.getEventSink()
+            if (eventSink != null) {
+                uiHandler.post {
+                    if (filePath != null) {
+                        eventSink.success(mapOf("type" to "success", "path" to filePath))
+                    } else {
+                        eventSink.error("screenshot_failed", errorMessage, null)
+                    }
+                }
+                //Log.d("ScreenshotService", "Result sent via EventChannel.")
+            } else {
+                // 如果 EventChannel 不可用，则回退到本地广播（作为备用方案）
+                //Log.d("ScreenshotService", "EventChannel not available, falling back to LocalBroadcast.")
+                val intent = Intent(ACTION_SCREENSHOT_RESULT).apply {
+                    putExtra(EXTRA_FILE_PATH, filePath)
+                    putExtra(EXTRA_ERROR_MESSAGE, errorMessage)
+                }
+                LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
             }
-            LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
 
-            // 错误通知仍然可以显示，因为它不依赖于 Activity 的状态。
-            if (filePath == null) {
+            // 无论通信方式如何，都显示一个中性的系统通知
+            if (filePath != null) {
+                //showResultNotification("截图已捕获", "应用正在后台处理...")
+            } else {
                 showResultNotification("截屏失败", errorMessage ?: "未知错误", true)
             }
             
-            //Log.d("ScreenshotService", "Screenshot result broadcasted: path=$filePath, error=$errorMessage")
+            //Log.d("ScreenshotService", "Screenshot result processed: path=$filePath, error=$errorMessage")
         } finally {
             // 重置处理状态
             isProcessingScreenshot.set(false)
@@ -198,7 +205,7 @@ class ScreenshotService : AccessibilityService() {
     }
     
 
-    private fun captureScreenshotWithAccessibility() {
+    private fun captureScreenshot() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             sendResult(null, "Screenshot API is only available on Android P (API 28) and above.")
             return
@@ -366,15 +373,15 @@ class ScreenshotService : AccessibilityService() {
             .build()
     }
 
-    /**
-     * [NEW] Checks if root access is available.
-     */
+    // --- [NEW] Root Screenshot Implementation ---
     private fun isRootAvailable(): Boolean {
         var process: Process? = null
         return try {
-            // "-c" and "id" are separated intentionally.
             process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-            process.waitFor() == 0
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            val output = reader.readLine()
+            process.waitFor()
+            output != null && output.contains("uid=0")
         } catch (e: Exception) {
             false
         } finally {
@@ -382,40 +389,49 @@ class ScreenshotService : AccessibilityService() {
         }
     }
 
-    /**
-     * [NEW] Captures a screenshot using root command 'screencap'.
-     */
     private fun captureScreenshotWithRoot() {
         executor.execute {
             var process: Process? = null
-            val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-            val appDir = File(picturesDir, MainActivity.PICTURES_SUB_DIR)
-            if (!appDir.exists() && !appDir.mkdirs()) {
-                sendResult(null, "Failed to create directory for screenshot.")
-                return@execute
-            }
-            val fileName = "screenshot_${System.currentTimeMillis()}.png"
-            val file = File(appDir, fileName)
-            val filePath = file.absolutePath
+            var filePath: String? = null
+            var error: String? = null
 
             try {
-                // Execute the screencap command
-                val command = arrayOf("su", "-c", "/system/bin/screencap -p $filePath")
-                process = Runtime.getRuntime().exec(command)
-                
+                val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                val appDir = File(picturesDir, MainActivity.PICTURES_SUB_DIR)
+                if (!appDir.exists() && !appDir.mkdirs()) {
+                    throw Exception("Could not create directory: ${appDir.absolutePath}")
+                }
+
+                val fileName = "screenshot_${System.currentTimeMillis()}.png"
+                val file = File(appDir, fileName)
+                filePath = file.absolutePath
+
+                // Command to take screenshot and save to the file path
+                val command = "/system/bin/screencap -p \"$filePath\"\n"
+
+                process = Runtime.getRuntime().exec("su")
+                val os = DataOutputStream(process.outputStream)
+                os.writeBytes(command)
+                os.writeBytes("exit\n")
+                os.flush()
+
                 val exitCode = process.waitFor()
-                
+
                 if (exitCode == 0) {
-                    // Notify media scanner to make the image visible in the gallery
+                    // Success, notify media scanner
                     notifyMediaScanner(filePath)
-                    sendResult(filePath, null)
                 } else {
-                    sendResult(null, "Root screencap command failed with exit code: $exitCode")
+                    error = "Root screenshot command failed with exit code $exitCode"
+                    filePath = null
                 }
             } catch (e: Exception) {
-                sendResult(null, "Error capturing screenshot with root: ${e.message}")
+                error = "Root screenshot failed: ${e.message}"
+                filePath = null
             } finally {
                 process?.destroy()
+                handler.post {
+                    sendResult(filePath, error)
+                }
             }
         }
     }
