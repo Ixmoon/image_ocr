@@ -41,7 +41,7 @@ class ScreenshotService : AccessibilityService() {
         
         // 通知相关常量
         private const val NOTIFICATION_CHANNEL_ID = "screenshot_service_channel"
-        private const val NOTIFICATION_ID = 1001
+        private const val FOREGROUND_NOTIFICATION_ID = 1 // 前台服务通知ID
         private const val RESULT_NOTIFICATION_ID = 1002
 
         // A simple event bus to receive commands from the MainActivity/Flutter.
@@ -66,10 +66,14 @@ class ScreenshotService : AccessibilityService() {
         sharedPreferences = getSharedPreferences("screenshot_service_prefs", Context.MODE_PRIVATE)
         createNotificationChannel()
         
+        // 将服务提升到前台
+        val notification = createForegroundNotification()
+        startForeground(FOREGROUND_NOTIFICATION_ID, notification)
+        
         // 重新建立连接的逻辑
         reconnect()
         
-        //Log.d("ScreenshotService", "Service connected and ready")
+        //Log.d("ScreenshotService", "Service connected and running in foreground")
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -316,7 +320,8 @@ class ScreenshotService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         eventHandler = null
         serviceInstance = null
-        //Log.d("ScreenshotService", "Service unbound")
+        stopForeground(true) // 服务解绑时停止前台状态
+        //Log.d("ScreenshotService", "Service unbound and foreground state stopped")
         return super.onUnbind(intent)
     }
     
@@ -326,5 +331,38 @@ class ScreenshotService : AccessibilityService() {
     fun triggerScreenshot() {
         //Log.d("ScreenshotService", "Triggering screenshot from external call")
         captureScreenshot()
+    }
+
+    /**
+     * 创建前台服务所需的通知
+     */
+    private fun createForegroundNotification(): Notification {
+        val channelId = NOTIFICATION_CHANNEL_ID
+        val channelName = "无障碍服务"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                channelName,
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "确保无障碍服务持续运行"
+                setShowBadge(false)
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val intent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, channelId)
+            .setContentTitle("服务运行中")
+            .setContentText("无障碍截图服务正在运行，以提供实时处理功能。")
+            .setSmallIcon(android.R.drawable.ic_dialog_info) // 使用一个系统图标
+            .setContentIntent(pendingIntent)
+            .setOngoing(true) // 使通知不可清除
+            .build()
     }
 }
