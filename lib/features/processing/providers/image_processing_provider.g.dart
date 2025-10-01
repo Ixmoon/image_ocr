@@ -6,7 +6,7 @@ part of 'image_processing_provider.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$imageProcessingHash() => r'066030a14a10f796401aa1b1ef19b6db165a04e7';
+String _$imageProcessingHash() => r'cb4c59684716e7d62b9b50e201db80a1ebf40398';
 
 /// See also [ImageProcessing].
 @ProviderFor(ImageProcessing)

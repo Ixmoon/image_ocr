@@ -1,17 +1,18 @@
-import 'dart:developer';
 import 'dart:isolate';
 import 'dart:ui';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:image_ocr/features/overlay/template_selector_widget.dart';
-import 'package:image_ocr/features/templates/models/folder.dart';
 import 'package:image_ocr/features/templates/models/template.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
+import 'package:image_ocr/features/templates/widgets/template_selector.dart';
+
+enum OverlayState { collapsed, expanded, capturing, invisible }
 
 class OverlayWidget extends ConsumerStatefulWidget {
-  const OverlayWidget({Key? key}) : super(key: key);
+  const OverlayWidget({super.key});
 
   @override
   ConsumerState<OverlayWidget> createState() => _OverlayWidgetState();
@@ -22,79 +23,166 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
   static const String _kPortNameHome = 'UI';
   final _receivePort = ReceivePort();
   SendPort? homePort;
-  String? latestMessageFromOverlay;
-  bool isExpanded = false;
+  OverlayState _state = OverlayState.collapsed;
+  OverlayState _previousState = OverlayState.collapsed;
+  
+  // This channel is not used here, commands are sent via Isolate ports.
+  // static const MethodChannel _screenshotChannel = MethodChannel('com.example.image_ocr/screenshot');
 
   @override
   void initState() {
     super.initState();
-    if (homePort != null) return;
-    final res = IsolateNameServer.registerPortWithName(
-      _receivePort.sendPort,
-      _kPortNameOverlay,
-    );
-    log("$res : OVERLAY_REGISTERED");
+    homePort ??= IsolateNameServer.lookupPortByName(_kPortNameHome);
+    IsolateNameServer.registerPortWithName(_receivePort.sendPort, _kPortNameOverlay);
+    
+    // 监听来自主应用的命令
     _receivePort.listen((message) {
-      log("message from UI: $message");
-      if (mounted) {
-        setState(() {
-          latestMessageFromOverlay = 'message from UI: $message';
-        });
+      if (message is Map<String, dynamic>) {
+        final command = message['command'] as String?;
+        switch (command) {
+          case 'close_overlay':
+            FlutterOverlayWindow.closeOverlay();
+            break;
+          case 'update_state':
+            // This logic might need adjustment based on the new state machine
+            break;
+          case 'screenshot_done':
+            // Screenshot is done, restore previous state
+            final wasExpanded = message['wasExpanded'] as bool? ?? false;
+            setState(() {
+              _state = wasExpanded ? OverlayState.expanded : OverlayState.collapsed;
+            });
+            _resizeOverlay();
+            break;
+        }
+      }
+    });
+    
+    // 定期检查主应用连接状态
+    _startHeartbeat();
+  }
+  
+  /// 定期检查与主应用的连接
+  void _startHeartbeat() {
+    Timer.periodic(const Duration(seconds: 30), (timer) {
+      homePort ??= IsolateNameServer.lookupPortByName(_kPortNameHome);
+      if (homePort == null) {
+        // 连接丢失，尝试重新建立
+        debugPrint('Lost connection to main app, attempting to reconnect...');
       }
     });
   }
 
-  Future<void> _sendMessageToMain() async {
-    final selectedTemplate = ref.read(overlaySelectedTemplateProvider);
-    if (selectedTemplate == null) {
-      log("没有选择模板");
-      return;
-    }
-
-    homePort ??= IsolateNameServer.lookupPortByName(_kPortNameHome);
-    if (homePort != null) {
+  /// 截屏处理逻辑 (V2: 清晰分离命令)
+  Future<void> _handleScreenshot() async {
+    try {
+      _previousState = _state;
+      
       setState(() {
-        latestMessageFromOverlay = "正在处理截屏...";
+        _state = OverlayState.invisible;
       });
+      await _resizeOverlay();
       
-      homePort?.send([
-        'request_screenshot_processing',
-        {
-          'templateId': selectedTemplate.id,
-          'templateName': selectedTemplate.name,
-        }
-      ]);
+      // --- 核心修复：根据是否选择模板，发送不同命令 ---
+      final selectedTemplates = ref.read(selectedTemplatesForProcessingProvider);
       
-      await Future.delayed(const Duration(milliseconds: 1000));
-      await FlutterOverlayWindow.closeOverlay();
-    } else {
-      log("无法连接到主应用");
+      if (selectedTemplates.isNotEmpty) {
+        // 截屏并处理
+        await _sendMessageToMain('request_screenshot_and_process', {
+          'wasExpanded': _previousState == OverlayState.expanded,
+          'templates': selectedTemplates.map((t) => {'templateId': t.id}).toList(),
+        });
+      } else {
+        // 仅截屏
+        await _sendMessageToMain('request_screenshot_only', {
+          'wasExpanded': _previousState == OverlayState.expanded,
+        });
+      }
+      
+      // 恢复状态的逻辑现在由主应用在处理完成后���过 'screenshot_done' 命令触发
+      // 因此这里不再需要手动恢复
+      
+    } catch (e) {
+      debugPrint('截屏请求失败: $e');
+      // 出错时也要恢复状态
+      await _restorePreviousState();
     }
   }
 
-  Future<void> _toggleExpansion() async {
-    if (isExpanded) {
-      await FlutterOverlayWindow.resizeOverlay(60, 60, true);
-      setState(() {
-        isExpanded = false;
+  /// 向主应用发送消息
+  Future<void> _sendMessageToMain(String command, Map<String, dynamic> payload) async {
+    homePort ??= IsolateNameServer.lookupPortByName(_kPortNameHome);
+    if (homePort != null) {
+      homePort!.send({
+        'command': command,
+        'payload': payload,
       });
+      debugPrint('Message sent to main: $command');
     } else {
-      await FlutterOverlayWindow.resizeOverlay(350, 500, true);
-      setState(() {
-        isExpanded = true;
-      });
+      debugPrint('Failed to send message: Cannot connect to main app.');
+      // 可以考虑在这里增加一些错误提示，比如弹出一个Toast
+      throw Exception('无法连接到主应用');
+    }
+  }
+  
+  /// 恢复到之前的状态
+  Future<void> _restorePreviousState() async {
+    setState(() {
+      _state = _previousState;
+    });
+    await _resizeOverlay();
+  }
+
+  Future<void> _toggleExpansion() async {
+    setState(() {
+      _state = (_state == OverlayState.collapsed)
+          ? OverlayState.expanded
+          : OverlayState.collapsed;
+    });
+    await _resizeOverlay();
+  }
+
+  Future<void> _resizeOverlay() async {
+    switch (_state) {
+      case OverlayState.collapsed:
+        await FlutterOverlayWindow.resizeOverlay(60, 60, true);
+        break;
+      case OverlayState.expanded:
+        await FlutterOverlayWindow.resizeOverlay(350, 600, true);
+        break;
+      case OverlayState.capturing:
+        await FlutterOverlayWindow.resizeOverlay(80, 80, true);
+        break;
+      case OverlayState.invisible:
+        await FlutterOverlayWindow.resizeOverlay(1, 1, true);
+        break;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Directionality(
-      textDirection: TextDirection.ltr,
-      child: Material(
+    // --- [CRITICAL FIX] Wrap the entire overlay in a MaterialApp ---
+    // This provides the necessary Overlay context for widgets like Tooltip to function.
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Material(
         color: Colors.transparent,
-        child: isExpanded ? _buildExpandedView() : _buildCollapsedView(),
+        child: _buildOverlayContent(),
       ),
     );
+  }
+
+  Widget _buildOverlayContent() {
+    switch (_state) {
+      case OverlayState.collapsed:
+        return _buildCollapsedView();
+      case OverlayState.expanded:
+        return _buildExpandedView();
+      case OverlayState.capturing:
+        return _buildCapturingView();
+      case OverlayState.invisible:
+        return _buildInvisibleView();
+    }
   }
 
   Widget _buildCollapsedView() {
@@ -125,10 +213,41 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
     );
   }
 
+  Widget _buildCapturingView() {
+    return Container(
+      width: 80,
+      height: 80,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Colors.deepPurple.withOpacity(0.8),
+      ),
+      child: const Center(
+        child: SizedBox(
+          width: 32,
+          height: 32,
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+            strokeWidth: 3,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInvisibleView() {
+    return Container(
+      width: 1,
+      height: 1,
+      color: Colors.transparent,
+    );
+  }
+
   Widget _buildExpandedView() {
+    final selectedTemplates = ref.watch(selectedTemplatesForProcessingProvider);
+
     return Container(
       width: 350,
-      height: 500,
+      height: 600,
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
@@ -141,7 +260,6 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
       ),
       child: Column(
         children: [
-          // 标题栏（可拖动区域）
           Container(
             height: 48,
             decoration: const BoxDecoration(
@@ -152,267 +270,72 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
               ),
             ),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Padding(
-                  padding: EdgeInsets.only(left: 16.0),
-                  child: Text(
-                    '选择模板',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 16.0),
+                    child: Text(
+                      '已选 ${selectedTemplates.length} 个模板',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ),
+                // --- [NEW] Minimize Button ---
+                IconButton(
+                  icon: const Icon(Icons.minimize, color: Colors.white),
+                  tooltip: '最小化',
+                  onPressed: _toggleExpansion, // Minimize action is the same as toggling expansion
+                ),
+                // --- [CHANGED] Close Button ---
                 IconButton(
                   icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: _toggleExpansion,
+                  tooltip: '关闭悬浮窗',
+                  onPressed: () async {
+                    // This now permanently closes the overlay for the session.
+                    await FlutterOverlayWindow.closeOverlay();
+                  },
                 ),
               ],
             ),
           ),
-          // 内容区域
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                children: [
-                  // 模板选择器（使用按钮翻页）
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey.shade300),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const PaginatedTemplateSelector(),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  // 截屏并处理按钮
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                      onPressed: _sendMessageToMain,
-                      child: const Text('截屏并处理'),
-                    ),
-                  ),
-                  // 状态消息
-                  if (latestMessageFromOverlay != null) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      latestMessageFromOverlay!,
-                      style: const TextStyle(fontSize: 12),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                ],
+            child: TemplateSelector(
+              selectedTemplates: selectedTemplates,
+              enablePagination: true, // 在悬浮窗中启用分页功能
+              onTemplateSelectionChanged: (template) {
+                final notifier = ref.read(selectedTemplatesForProcessingProvider.notifier);
+                final currentSelection = Set<Template>.from(notifier.state);
+                if (currentSelection.any((t) => t.id == template.id)) {
+                  currentSelection.removeWhere((t) => t.id == template.id);
+                } else {
+                  currentSelection.add(template);
+                }
+                notifier.state = currentSelection;
+              },
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                onPressed: _handleScreenshot,
+                child: Text(selectedTemplates.isNotEmpty ? '截屏并处理' : '仅截屏'),
               ),
             ),
           ),
         ],
       ),
-    );
-  }
-}
-
-// 分页的模板选择器，使用按钮翻页避免滚动手势冲突
-class PaginatedTemplateSelector extends ConsumerStatefulWidget {
-  const PaginatedTemplateSelector({super.key});
-
-  @override
-  ConsumerState<PaginatedTemplateSelector> createState() => _PaginatedTemplateSelectorState();
-}
-
-class _PaginatedTemplateSelectorState extends ConsumerState<PaginatedTemplateSelector> {
-  int currentPage = 0;
-  final int itemsPerPage = 5;
-  late final List<String?> _navigationStack;
-
-  @override
-  void initState() {
-    super.initState();
-    // Initialize navigation stack with the root folder.
-    _navigationStack = [ref.read(currentFolderIdProvider)];
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final currentFolderId = _navigationStack.last;
-    final contentsAsync = ref.watch(folderContentsProvider(currentFolderId));
-    final selectedTemplate = ref.watch(overlaySelectedTemplateProvider);
-
-    return contentsAsync.when(
-      loading: () => const Center(
-        child: SizedBox(
-          width: 16, 
-          height: 16, 
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-      ),
-      error: (err, stack) => const Center(
-        child: Text(
-          '加载失败',
-          style: TextStyle(fontSize: 10),
-        ),
-      ),
-      data: (contents) {
-        if (contents.isEmpty) {
-          return const Center(
-            child: Text(
-              '此文件夹为空',
-              style: TextStyle(fontSize: 10),
-            ),
-          );
-        }
-
-        final totalItems = contents.length;
-        final totalPages = (totalItems / itemsPerPage).ceil();
-        final startIndex = currentPage * itemsPerPage;
-        final endIndex = (startIndex + itemsPerPage).clamp(0, totalItems);
-        final currentItems = contents.sublist(startIndex, endIndex);
-
-        return Column(
-          children: [
-            // 导航和翻页控制栏
-            Container(
-              height: 40,
-              decoration: BoxDecoration(
-                color: Colors.grey.shade100,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(8),
-                  topRight: Radius.circular(8),
-                ),
-              ),
-              child: Row(
-                children: [
-                  // 返回按钮
-                  if (_navigationStack.length > 1)
-                    IconButton(
-                      icon: const Icon(Icons.arrow_back, size: 16),
-                      onPressed: () => setState(() {
-                        _navigationStack.removeLast();
-                        currentPage = 0;
-                      }),
-                    ),
-                  // 翻页控制
-                  Expanded(
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.chevron_left, size: 16),
-                          onPressed: currentPage > 0
-                              ? () => setState(() => currentPage--)
-                              : null,
-                        ),
-                        Text(
-                          '${currentPage + 1} / $totalPages',
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.chevron_right, size: 16),
-                          onPressed: currentPage < totalPages - 1
-                              ? () => setState(() => currentPage++)
-                              : null,
-                        ),
-                      ],
-                    ),
-                  ),
-                  // 占位保持对称
-                  if (_navigationStack.length <= 1)
-                    const SizedBox(width: 48),
-                ],
-              ),
-            ),
-            // 当前页内容
-            Expanded(
-              child: ListView.builder(
-                physics: const NeverScrollableScrollPhysics(), // 禁用滚动
-                padding: const EdgeInsets.all(4.0),
-                itemCount: currentItems.length,
-                itemBuilder: (context, index) {
-                  final item = currentItems[index];
-                  if (item is Folder) {
-                    return Container(
-                      margin: const EdgeInsets.symmetric(vertical: 1.0),
-                      child: InkWell(
-                        onTap: () {
-                          // 进入子文件夹时重置页码
-                          setState(() {
-                            currentPage = 0;
-                            _navigationStack.add(item.id);
-                          });
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 3.0),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.folder_outlined, size: 14, color: Colors.orange),
-                              const SizedBox(width: 4),
-                              Expanded(
-                                child: Text(
-                                  item.name,
-                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    );
-                  } else if (item is Template) {
-                    final template = item;
-                    final isSelected = selectedTemplate?.id == template.id;
-                    return Container(
-                      margin: const EdgeInsets.symmetric(vertical: 1.0),
-                      child: InkWell(
-                        onTap: () {
-                          ref.read(overlaySelectedTemplateProvider.notifier).state = template;
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 3.0),
-                          decoration: BoxDecoration(
-                            color: isSelected ? Colors.blue.shade100 : Colors.transparent,
-                            borderRadius: BorderRadius.circular(3),
-                            border: isSelected ? Border.all(color: Colors.blue, width: 1) : null,
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                isSelected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
-                                size: 14,
-                                color: isSelected ? Colors.blue : Colors.grey,
-                              ),
-                              const SizedBox(width: 4),
-                              Expanded(
-                                child: Text(
-                                  template.name,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: isSelected ? FontWeight.w500 : FontWeight.normal,
-                                    color: isSelected ? Colors.blue.shade700 : Colors.black87,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    );
-                  }
-                  return const SizedBox.shrink();
-                },
-              ),
-            ),
-          ],
-        );
-      },
     );
   }
 }

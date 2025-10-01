@@ -2,9 +2,10 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_ocr/core/router/app_router.dart';
+import 'package:gal/gal.dart';
+import 'package:image_ocr/core/constants/app_constants.dart';
 import 'package:image_ocr/features/processing/models/image_processing_state.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:saver_gallery/saver_gallery.dart';
 
 class BatchPreviewScreen extends StatefulWidget {
   final ImageProcessingState processingState;
@@ -55,17 +56,11 @@ class _BatchPreviewScreenState extends State<BatchPreviewScreen> {
 
       for (final path in resultImagePaths) {
         try {
-          final result = await SaverGallery.saveFile(
-            filePath: path,
-            fileName: 'processed_image_${DateTime.now().millisecondsSinceEpoch}_$successCount.png',
-            skipIfExists: true,
-            androidRelativePath: "Pictures/ImageOCR",
-          );
-          if (result.isSuccess) {
-            successCount++;
-          }
+          // 直接调用gal插件保存，无需任何手动文件检查或路径管理
+          await Gal.putImage(path, album: AppConstants.imageAlbumName);
+          successCount++;
         } catch (e) {
-          // 忽略单张图片的保存失败
+          // Log or handle individual file saving errors if necessary.
         }
       }
 

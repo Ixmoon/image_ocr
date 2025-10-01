@@ -1,8 +1,5 @@
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:typed_data';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart'; // CRITICAL FIX: Import for Isolate binding
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as img;
@@ -109,7 +106,7 @@ void processingWorkerEntryPoint(Map<String, dynamic> context) async {
   final textRecognizer = TextRecognizer(script: TextRecognitionScript.chinese);
 
   // Enhanced cache to hold pre-decoded image objects
-  _WorkerCache? _cache;
+  _WorkerCache? cache;
 
   await for (final dynamic message in workerReceivePort) {
     if (message is ProcessingRequest) {
@@ -117,7 +114,7 @@ void processingWorkerEntryPoint(Map<String, dynamic> context) async {
         dynamic result;
         switch (message.taskType) {
           case TaskType.initialize:
-            _cache = _WorkerCache.create(message.payload as InitializePayload);
+            cache = _WorkerCache.create(message.payload as InitializePayload);
             result = true;
             break;
           case TaskType.decode:
@@ -127,17 +124,17 @@ void processingWorkerEntryPoint(Map<String, dynamic> context) async {
             result = await _performOcr(textRecognizer, message.payload as OcrPayload);
             break;
           case TaskType.composition:
-            if (_cache == null) {
+            if (cache == null) {
               throw StateError('Worker has not been initialized with template data.');
             }
             result = await _performComposition(
               message.payload as CompositionPayload,
-              _cache!,
+              cache,
             );
             break;
         }
         message.sendPort.send(ProcessingResponse.success(result));
-      } catch (e, s) {
+      } catch (e) {
         message.sendPort.send(ProcessingResponse.failure(e.toString()));
       }
     }
@@ -227,46 +224,52 @@ Future<Uint8List> _performDecode(String imagePath) async {
 /// Performs text recognition on raw image bytes, applying platform-specific optimizations.
 /// Returns both the OCR result and the original image size.
 Future<(RecognizedText, Size)> _performOcr(TextRecognizer textRecognizer, OcrPayload payload) async {
-  final image = img.decodeImage(payload.imageBytes);
-  if (image == null) throw Exception('Failed to decode image: ${payload.imagePath}');
+  img.Image? image;
+  try {
+    image = img.decodeImage(payload.imageBytes);
+    if (image == null) throw Exception('Failed to decode image: ${payload.imagePath}');
 
-  InputImage inputImage;
-  final imageSize = Size(image.width.toDouble(), image.height.toDouble());
+    InputImage inputImage;
+    final imageSize = Size(image.width.toDouble(), image.height.toDouble());
 
-  if (Platform.isAndroid) {
-    // Use the highly optimized NV21 conversion path for Android.
-    final evenWidth = image.width.isOdd ? image.width - 1 : image.width;
-    final evenHeight = image.height.isOdd ? image.height - 1 : image.height;
+    if (Platform.isAndroid) {
+      // Use the highly optimized NV21 conversion path for Android.
+      final evenWidth = image.width.isOdd ? image.width - 1 : image.width;
+      final evenHeight = image.height.isOdd ? image.height - 1 : image.height;
 
-    final sharpenedLuma = _applyGrayscaleAndSharpen(image, evenWidth, evenHeight);
-    final nv21Bytes = _convertRgbToNv21WithPrecomputedLuma(image, sharpenedLuma, evenWidth, evenHeight);
-    
-    inputImage = InputImage.fromBytes(
-      bytes: nv21Bytes,
-      metadata: InputImageMetadata(
-        size: Size(evenWidth.toDouble(), evenHeight.toDouble()),
-        rotation: InputImageRotation.rotation0deg,
-        format: InputImageFormat.nv21,
-        bytesPerRow: evenWidth,
-      ),
-    );
-  } else {
-    // Use BGRA8888 for other platforms (e.g., iOS).
-    // OPTIMIZED: Get bytes directly without unnecessary copy
-    final bgraBytes = image.getBytes(order: img.ChannelOrder.bgra);
-    inputImage = InputImage.fromBytes(
-      bytes: bgraBytes,
-      metadata: InputImageMetadata(
-        size: imageSize,
-        rotation: InputImageRotation.rotation0deg,
-        format: InputImageFormat.bgra8888,
-        bytesPerRow: image.width * 4,
-      ),
-    );
+      final sharpenedLuma = _applyGrayscaleAndSharpen(image, evenWidth, evenHeight);
+      final nv21Bytes = _convertRgbToNv21WithPrecomputedLuma(image, sharpenedLuma, evenWidth, evenHeight);
+      
+      inputImage = InputImage.fromBytes(
+        bytes: nv21Bytes,
+        metadata: InputImageMetadata(
+          size: Size(evenWidth.toDouble(), evenHeight.toDouble()),
+          rotation: InputImageRotation.rotation0deg,
+          format: InputImageFormat.nv21,
+          bytesPerRow: evenWidth,
+        ),
+      );
+    } else {
+      // Use BGRA8888 for other platforms (e.g., iOS).
+      // OPTIMIZED: Get bytes directly without unnecessary copy
+      final bgraBytes = image.getBytes(order: img.ChannelOrder.bgra);
+      inputImage = InputImage.fromBytes(
+        bytes: bgraBytes,
+        metadata: InputImageMetadata(
+          size: imageSize,
+          rotation: InputImageRotation.rotation0deg,
+          format: InputImageFormat.bgra8888,
+          bytesPerRow: image.width * 4,
+        ),
+      );
+    }
+
+    final recognizedText = await textRecognizer.processImage(inputImage);
+    return (recognizedText, imageSize);
+  } finally {
+    // 优化：及时清理图片内存
+    image?.clear();
   }
-
-  final recognizedText = await textRecognizer.processImage(inputImage);
-  return (recognizedText, imageSize);
 }
 
 /// Performs image composition based on the provided payload.
@@ -299,54 +302,89 @@ Future<Uint8List> _performComposition(
 ) async {
   final compositionService = ImageCompositionService();
 
-  final targetImage = img.decodeImage(payload.targetImageBytes);
-  if (targetImage == null) {
-    throw Exception('Failed to decode target image in isolate: ${payload.targetImagePath}');
-  }
-
-  img.Image currentImage = targetImage;
-
-  for (final template in cache.initPayload.templates) {
-    final templateOcrResult = cache.initPayload.templateOcrResults[template.id]!;
-    final templateImage = cache.decodedTemplateImages[template.id];
-    if (templateImage == null) {
-      throw Exception('Failed to find pre-decoded template image in cache: ${template.name}');
+  img.Image? targetImage;
+  img.Image? currentImage;
+  try {
+    targetImage = img.decodeImage(payload.targetImageBytes);
+    if (targetImage == null) {
+      throw Exception('Failed to decode target image in isolate: ${payload.targetImagePath}');
     }
 
-    for (final fieldId in template.fieldIds) {
-      final field = cache.initPayload.fieldsMap[fieldId];
-      if (field == null) continue;
+    currentImage = targetImage;
+    bool atLeastOneFieldApplied = false; // 标志位，追踪是否有字段被应用
 
-      final templateAnchor = findAnchorLine(ocrResult: templateOcrResult, searchText: field.name);
-      final targetAnchor = findAnchorLine(ocrResult: payload.targetOcrResult, searchText: field.name);
-      if (templateAnchor == null || targetAnchor == null) {
+    for (final template in cache.initPayload.templates) {
+      final templateOcrResult = cache.initPayload.templateOcrResults[template.id]!;
+      final templateImage = cache.decodedTemplateImages[template.id];
+      if (templateImage == null) {
         continue;
       }
 
-      final templateValueRect = findValueRectForAnchorLine(
-        anchorLine: templateAnchor,
-        imageSize: Size(templateImage.width.toDouble(), templateImage.height.toDouble()),
-      );
-      final patchImage = img.copyCrop(
-        templateImage,
-        x: templateValueRect.left.toInt(),
-        y: templateValueRect.top.toInt(),
-        width: templateValueRect.width.toInt(),
-        height: templateValueRect.height.toInt(),
-      );
+      for (final fieldId in template.fieldIds) {
+        final field = cache.initPayload.fieldsMap[fieldId];
+        if (field == null) continue;
 
-      final targetValueRect = findValueRectForAnchorLine(
-        anchorLine: targetAnchor,
-        imageSize: Size(targetImage.width.toDouble(), targetImage.height.toDouble()),
-      );
-      currentImage = compositionService.compose(
-        baseImage: currentImage,
-        patchImage: patchImage,
-        targetValueArea: targetValueRect,
-      );
+        final templateAnchor = findAnchorLine(ocrResult: templateOcrResult, searchText: field.name);
+        final targetAnchor = findAnchorLine(ocrResult: payload.targetOcrResult, searchText: field.name);
+        
+        // 如果在模板或目标图中找不到锚点，则跳过此字段
+        if (templateAnchor == null || targetAnchor == null) {
+          continue;
+        }
+
+        // 如果代码执行到这里，说明锚点已找到，我们将应用补丁
+        atLeastOneFieldApplied = true;
+
+        final templateValueRect = findValueRectForAnchorLine(
+          anchorLine: templateAnchor,
+          imageSize: Size(templateImage.width.toDouble(), templateImage.height.toDouble()),
+        );
+        
+        img.Image? patchImage;
+        try {
+          patchImage = img.copyCrop(
+            templateImage,
+            x: templateValueRect.left.toInt(),
+            y: templateValueRect.top.toInt(),
+            width: templateValueRect.width.toInt(),
+            height: templateValueRect.height.toInt(),
+          );
+
+          final targetValueRect = findValueRectForAnchorLine(
+            anchorLine: targetAnchor,
+            imageSize: Size(targetImage.width.toDouble(), targetImage.height.toDouble()),
+          );
+          
+          final newImage = compositionService.compose(
+            baseImage: currentImage!,
+            patchImage: patchImage,
+            targetValueArea: targetValueRect,
+          );
+          
+          // 优化：及时清理旧的图片内存
+          if (currentImage != targetImage) {
+            currentImage?.clear();
+          }
+          currentImage = newImage;
+        } finally {
+          // 清理patch图片内存
+          patchImage?.clear();
+        }
+      }
     }
-  }
 
-  final result = Uint8List.fromList(img.encodePng(currentImage));
-  return result;
+    // 在所有操作后，检查是否有任何字段被成功应用
+    if (!atLeastOneFieldApplied) {
+      throw Exception('Composition failed: No anchors were found in the target image for any of the provided templates.');
+    }
+
+    final result = Uint8List.fromList(img.encodePng(currentImage!));
+    return result;
+  } finally {
+    // 优化：确保所有图片内存被清理
+    if (currentImage != null && currentImage != targetImage) {
+      currentImage.clear();
+    }
+    targetImage?.clear();
+  }
 }

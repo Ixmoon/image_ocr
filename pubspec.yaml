@@ -46,6 +46,8 @@ dependencies:
   photo_manager: ^3.7.1
   photo_manager_image_provider: ^2.2.0
   flutter_overlay_window: ^0.5.0
+  android_intent_plus: ^6.0.0
+  flutter_local_notifications: ^17.2.1
 
 dev_dependencies:
   flutter_test:

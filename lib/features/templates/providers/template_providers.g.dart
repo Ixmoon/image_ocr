@@ -6,12 +6,13 @@ part of 'template_providers.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$templateServiceHash() => r'a250ac08f3040ee51c322c9934b865cb01e940cc';
+String _$templateServiceHash() => r'36d13a14783ac315bb1669b2f28b9692090cb896';
 
-/// See also [templateService].
-@ProviderFor(templateService)
-final templateServiceProvider = FutureProvider<TemplateService>.internal(
-  templateService,
+/// See also [TemplateService].
+@ProviderFor(TemplateService)
+final templateServiceProvider = AutoDisposeAsyncNotifierProvider<
+    TemplateService, template_service_lib.TemplateService>.internal(
+  TemplateService.new,
   name: r'templateServiceProvider',
   debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
       ? null
@@ -20,13 +21,32 @@ final templateServiceProvider = FutureProvider<TemplateService>.internal(
   allTransitiveDependencies: null,
 );
 
-typedef TemplateServiceRef = FutureProviderRef<TemplateService>;
-String _$currentFolderIdHash() => r'1e8b881406488a3504d72ee85510baedd67ef5f8';
+typedef _$TemplateService
+    = AutoDisposeAsyncNotifier<template_service_lib.TemplateService>;
+String _$folderNavigationStackHash() =>
+    r'fc9f47a7a42b293dcdf20cb64e55bba7139facc5';
 
-/// See also [currentFolderId].
-@ProviderFor(currentFolderId)
-final currentFolderIdProvider = AutoDisposeProvider<String?>.internal(
-  currentFolderId,
+/// See also [FolderNavigationStack].
+@ProviderFor(FolderNavigationStack)
+final folderNavigationStackProvider =
+    AutoDisposeNotifierProvider<FolderNavigationStack, List<String?>>.internal(
+  FolderNavigationStack.new,
+  name: r'folderNavigationStackProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$folderNavigationStackHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+typedef _$FolderNavigationStack = AutoDisposeNotifier<List<String?>>;
+String _$currentFolderIdHash() => r'36858449ad22ef258ff51d93c6cd9a041f9e59a7';
+
+/// See also [CurrentFolderId].
+@ProviderFor(CurrentFolderId)
+final currentFolderIdProvider =
+    AutoDisposeNotifierProvider<CurrentFolderId, String?>.internal(
+  CurrentFolderId.new,
   name: r'currentFolderIdProvider',
   debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
       ? null
@@ -35,8 +55,8 @@ final currentFolderIdProvider = AutoDisposeProvider<String?>.internal(
   allTransitiveDependencies: null,
 );
 
-typedef CurrentFolderIdRef = AutoDisposeProviderRef<String?>;
-String _$folderContentsHash() => r'd7bc99fa8ca5bb40ba58d36061dadf2a8ac86e7c';
+typedef _$CurrentFolderId = AutoDisposeNotifier<String?>;
+String _$folderContentsHash() => r'f00fce0a1c20a4af0bc90ee520e608d6173f913f';
 
 /// Copied from Dart SDK
 class _SystemHash {
@@ -59,16 +79,25 @@ class _SystemHash {
   }
 }
 
-/// See also [folderContents].
-@ProviderFor(folderContents)
+abstract class _$FolderContents
+    extends BuildlessAutoDisposeAsyncNotifier<List<dynamic>> {
+  late final String? folderId;
+
+  FutureOr<List<dynamic>> build(
+    String? folderId,
+  );
+}
+
+/// See also [FolderContents].
+@ProviderFor(FolderContents)
 const folderContentsProvider = FolderContentsFamily();
 
-/// See also [folderContents].
+/// See also [FolderContents].
 class FolderContentsFamily extends Family<AsyncValue<List<dynamic>>> {
-  /// See also [folderContents].
+  /// See also [FolderContents].
   const FolderContentsFamily();
 
-  /// See also [folderContents].
+  /// See also [FolderContents].
   FolderContentsProvider call(
     String? folderId,
   ) {
@@ -101,16 +130,14 @@ class FolderContentsFamily extends Family<AsyncValue<List<dynamic>>> {
   String? get name => r'folderContentsProvider';
 }
 
-/// See also [folderContents].
-class FolderContentsProvider extends AutoDisposeFutureProvider<List<dynamic>> {
-  /// See also [folderContents].
+/// See also [FolderContents].
+class FolderContentsProvider extends AutoDisposeAsyncNotifierProviderImpl<
+    FolderContents, List<dynamic>> {
+  /// See also [FolderContents].
   FolderContentsProvider(
     String? folderId,
   ) : this._internal(
-          (ref) => folderContents(
-            ref as FolderContentsRef,
-            folderId,
-          ),
+          () => FolderContents()..folderId = folderId,
           from: folderContentsProvider,
           name: r'folderContentsProvider',
           debugGetCreateSourceHash:
@@ -136,13 +163,20 @@ class FolderContentsProvider extends AutoDisposeFutureProvider<List<dynamic>> {
   final String? folderId;
 
   @override
-  Override overrideWith(
-    FutureOr<List<dynamic>> Function(FolderContentsRef provider) create,
+  FutureOr<List<dynamic>> runNotifierBuild(
+    covariant FolderContents notifier,
   ) {
+    return notifier.build(
+      folderId,
+    );
+  }
+
+  @override
+  Override overrideWith(FolderContents Function() create) {
     return ProviderOverride(
       origin: this,
       override: FolderContentsProvider._internal(
-        (ref) => create(ref as FolderContentsRef),
+        () => create()..folderId = folderId,
         from: from,
         name: null,
         dependencies: null,
@@ -154,7 +188,8 @@ class FolderContentsProvider extends AutoDisposeFutureProvider<List<dynamic>> {
   }
 
   @override
-  AutoDisposeFutureProviderElement<List<dynamic>> createElement() {
+  AutoDisposeAsyncNotifierProviderElement<FolderContents, List<dynamic>>
+      createElement() {
     return _FolderContentsProviderElement(this);
   }
 
@@ -172,26 +207,27 @@ class FolderContentsProvider extends AutoDisposeFutureProvider<List<dynamic>> {
   }
 }
 
-mixin FolderContentsRef on AutoDisposeFutureProviderRef<List<dynamic>> {
+mixin FolderContentsRef on AutoDisposeAsyncNotifierProviderRef<List<dynamic>> {
   /// The parameter `folderId` of this provider.
   String? get folderId;
 }
 
 class _FolderContentsProviderElement
-    extends AutoDisposeFutureProviderElement<List<dynamic>>
-    with FolderContentsRef {
+    extends AutoDisposeAsyncNotifierProviderElement<FolderContents,
+        List<dynamic>> with FolderContentsRef {
   _FolderContentsProviderElement(super.provider);
 
   @override
   String? get folderId => (origin as FolderContentsProvider).folderId;
 }
 
-String _$folderPathHash() => r'ad561a5836b6b1541ffb6f30122bf00a2442fbb3';
+String _$folderPathHash() => r'6b4e0213870a31e656247aaf4a090b84bb3d7a71';
 
-/// See also [folderPath].
-@ProviderFor(folderPath)
-final folderPathProvider = AutoDisposeFutureProvider<List<Folder?>>.internal(
-  folderPath,
+/// See also [FolderPath].
+@ProviderFor(FolderPath)
+final folderPathProvider =
+    AutoDisposeAsyncNotifierProvider<FolderPath, List<Folder?>>.internal(
+  FolderPath.new,
   name: r'folderPathProvider',
   debugGetCreateSourceHash:
       const bool.fromEnvironment('dart.vm.product') ? null : _$folderPathHash,
@@ -199,24 +235,49 @@ final folderPathProvider = AutoDisposeFutureProvider<List<Folder?>>.internal(
   allTransitiveDependencies: null,
 );
 
-typedef FolderPathRef = AutoDisposeFutureProviderRef<List<Folder?>>;
-String _$templateByIdHash() => r'258c6ca54803aad8a68b76c58f063cecbc086240';
+typedef _$FolderPath = AutoDisposeAsyncNotifier<List<Folder?>>;
+String _$templateCreationHash() => r'667a801d2bf48ef9aa629914abf8e03e54b993ab';
 
-/// See also [templateById].
-@ProviderFor(templateById)
+/// See also [TemplateCreation].
+@ProviderFor(TemplateCreation)
+final templateCreationProvider =
+    AutoDisposeNotifierProvider<TemplateCreation, Template>.internal(
+  TemplateCreation.new,
+  name: r'templateCreationProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$templateCreationHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+typedef _$TemplateCreation = AutoDisposeNotifier<Template>;
+String _$templateByIdHash() => r'920681502666279f6b4d2bdb7dec83f7ce10fbc0';
+
+abstract class _$TemplateById
+    extends BuildlessAutoDisposeAsyncNotifier<Template> {
+  late final String id;
+
+  FutureOr<Template> build(
+    String id,
+  );
+}
+
+/// See also [TemplateById].
+@ProviderFor(TemplateById)
 const templateByIdProvider = TemplateByIdFamily();
 
-/// See also [templateById].
+/// See also [TemplateById].
 class TemplateByIdFamily extends Family<AsyncValue<Template>> {
-  /// See also [templateById].
+  /// See also [TemplateById].
   const TemplateByIdFamily();
 
-  /// See also [templateById].
+  /// See also [TemplateById].
   TemplateByIdProvider call(
-    String templateId,
+    String id,
   ) {
     return TemplateByIdProvider(
-      templateId,
+      id,
     );
   }
 
@@ -225,7 +286,7 @@ class TemplateByIdFamily extends Family<AsyncValue<Template>> {
     covariant TemplateByIdProvider provider,
   ) {
     return call(
-      provider.templateId,
+      provider.id,
     );
   }
 
@@ -244,16 +305,14 @@ class TemplateByIdFamily extends Family<AsyncValue<Template>> {
   String? get name => r'templateByIdProvider';
 }
 
-/// See also [templateById].
-class TemplateByIdProvider extends AutoDisposeFutureProvider<Template> {
-  /// See also [templateById].
+/// See also [TemplateById].
+class TemplateByIdProvider
+    extends AutoDisposeAsyncNotifierProviderImpl<TemplateById, Template> {
+  /// See also [TemplateById].
   TemplateByIdProvider(
-    String templateId,
+    String id,
   ) : this._internal(
-          (ref) => templateById(
-            ref as TemplateByIdRef,
-            templateId,
-          ),
+          () => TemplateById()..id = id,
           from: templateByIdProvider,
           name: r'templateByIdProvider',
           debugGetCreateSourceHash:
@@ -263,7 +322,7 @@ class TemplateByIdProvider extends AutoDisposeFutureProvider<Template> {
           dependencies: TemplateByIdFamily._dependencies,
           allTransitiveDependencies:
               TemplateByIdFamily._allTransitiveDependencies,
-          templateId: templateId,
+          id: id,
         );
 
   TemplateByIdProvider._internal(
@@ -273,69 +332,93 @@ class TemplateByIdProvider extends AutoDisposeFutureProvider<Template> {
     required super.allTransitiveDependencies,
     required super.debugGetCreateSourceHash,
     required super.from,
-    required this.templateId,
+    required this.id,
   }) : super.internal();
 
-  final String templateId;
+  final String id;
 
   @override
-  Override overrideWith(
-    FutureOr<Template> Function(TemplateByIdRef provider) create,
+  FutureOr<Template> runNotifierBuild(
+    covariant TemplateById notifier,
   ) {
+    return notifier.build(
+      id,
+    );
+  }
+
+  @override
+  Override overrideWith(TemplateById Function() create) {
     return ProviderOverride(
       origin: this,
       override: TemplateByIdProvider._internal(
-        (ref) => create(ref as TemplateByIdRef),
+        () => create()..id = id,
         from: from,
         name: null,
         dependencies: null,
         allTransitiveDependencies: null,
         debugGetCreateSourceHash: null,
-        templateId: templateId,
+        id: id,
       ),
     );
   }
 
   @override
-  AutoDisposeFutureProviderElement<Template> createElement() {
+  AutoDisposeAsyncNotifierProviderElement<TemplateById, Template>
+      createElement() {
     return _TemplateByIdProviderElement(this);
   }
 
   @override
   bool operator ==(Object other) {
-    return other is TemplateByIdProvider && other.templateId == templateId;
+    return other is TemplateByIdProvider && other.id == id;
   }
 
   @override
   int get hashCode {
     var hash = _SystemHash.combine(0, runtimeType.hashCode);
-    hash = _SystemHash.combine(hash, templateId.hashCode);
+    hash = _SystemHash.combine(hash, id.hashCode);
 
     return _SystemHash.finish(hash);
   }
 }
 
-mixin TemplateByIdRef on AutoDisposeFutureProviderRef<Template> {
-  /// The parameter `templateId` of this provider.
-  String get templateId;
+mixin TemplateByIdRef on AutoDisposeAsyncNotifierProviderRef<Template> {
+  /// The parameter `id` of this provider.
+  String get id;
 }
 
 class _TemplateByIdProviderElement
-    extends AutoDisposeFutureProviderElement<Template> with TemplateByIdRef {
+    extends AutoDisposeAsyncNotifierProviderElement<TemplateById, Template>
+    with TemplateByIdRef {
   _TemplateByIdProviderElement(super.provider);
 
   @override
-  String get templateId => (origin as TemplateByIdProvider).templateId;
+  String get id => (origin as TemplateByIdProvider).id;
 }
 
-String _$templatesAndFoldersActionsHash() =>
-    r'ebe774d8cc1b6d309c25e4893a561509a20ab751';
+String _$allTemplatesHash() => r'cee18972b700e590262d6c84be9582c4448c271f';
 
-/// See also [templatesAndFoldersActions].
-@ProviderFor(templatesAndFoldersActions)
-final templatesAndFoldersActionsProvider =
-    AutoDisposeProvider<TemplatesAndFoldersActions>.internal(
-  templatesAndFoldersActions,
+/// See also [AllTemplates].
+@ProviderFor(AllTemplates)
+final allTemplatesProvider =
+    AutoDisposeAsyncNotifierProvider<AllTemplates, List<Template>>.internal(
+  AllTemplates.new,
+  name: r'allTemplatesProvider',
+  debugGetCreateSourceHash:
+      const bool.fromEnvironment('dart.vm.product') ? null : _$allTemplatesHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+typedef _$AllTemplates = AutoDisposeAsyncNotifier<List<Template>>;
+String _$templatesAndFoldersActionsHash() =>
+    r'bbe1e3d922f64858dc3e1a441ba2468b05dc3b4d';
+
+/// See also [TemplatesAndFoldersActions].
+@ProviderFor(TemplatesAndFoldersActions)
+final templatesAndFoldersActionsProvider = AutoDisposeNotifierProvider<
+    TemplatesAndFoldersActions, TemplatesAndFoldersActionsLogic>.internal(
+  TemplatesAndFoldersActions.new,
   name: r'templatesAndFoldersActionsProvider',
   debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
       ? null
@@ -344,40 +427,7 @@ final templatesAndFoldersActionsProvider =
   allTransitiveDependencies: null,
 );
 
-typedef TemplatesAndFoldersActionsRef
-    = AutoDisposeProviderRef<TemplatesAndFoldersActions>;
-String _$folderNavigationStackHash() =>
-    r'fc9f47a7a42b293dcdf20cb64e55bba7139facc5';
-
-/// See also [FolderNavigationStack].
-@ProviderFor(FolderNavigationStack)
-final folderNavigationStackProvider =
-    AutoDisposeNotifierProvider<FolderNavigationStack, List<String?>>.internal(
-  FolderNavigationStack.new,
-  name: r'folderNavigationStackProvider',
-  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
-      ? null
-      : _$folderNavigationStackHash,
-  dependencies: null,
-  allTransitiveDependencies: null,
-);
-
-typedef _$FolderNavigationStack = AutoDisposeNotifier<List<String?>>;
-String _$templateCreationHash() => r'accd340ca21dcd72502b8c77c1c0e985577c91db';
-
-/// See also [TemplateCreation].
-@ProviderFor(TemplateCreation)
-final templateCreationProvider =
-    AutoDisposeNotifierProvider<TemplateCreation, Template>.internal(
-  TemplateCreation.new,
-  name: r'templateCreationProvider',
-  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
-      ? null
-      : _$templateCreationHash,
-  dependencies: null,
-  allTransitiveDependencies: null,
-);
-
-typedef _$TemplateCreation = AutoDisposeNotifier<Template>;
+typedef _$TemplatesAndFoldersActions
+    = AutoDisposeNotifier<TemplatesAndFoldersActionsLogic>;
 // ignore_for_file: type=lint
 // ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member

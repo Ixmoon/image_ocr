@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
+import 'package:path/path.dart' as p;
 
 /// 负责创建和清理临时文件，确保应用不会留下垃圾文件。
 class TemporaryFileService {
@@ -22,7 +23,8 @@ class TemporaryFileService {
   /// 返回创建的临时文件的完整路径。
   Future<String> create(String prefix, String extension) async {
     final dir = await _directory;
-    final path = '${dir.path}/$prefix${const Uuid().v4()}$extension';
+    final fileName = '$prefix${const Uuid().v4()}$extension';
+    final path = p.join(dir.path, fileName);
     _tempFilePaths.add(path);
     return path;
   }

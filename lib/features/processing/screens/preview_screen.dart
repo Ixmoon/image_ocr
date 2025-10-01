@@ -1,9 +1,10 @@
 // lib/features/processing/screens/preview_screen.dart
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:image_ocr/core/constants/app_constants.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:gal/gal.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:saver_gallery/saver_gallery.dart';
 
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -26,34 +27,33 @@ class PreviewScreen extends StatelessWidget {
   }
 
   Future<void> _saveToGallery(BuildContext context) async {
-    // 请求更精确的 photos 权限
+    // 检查权限
     final status = await Permission.photos.request();
-    if (status.isGranted || status.isLimited) {
-      try {
-        // --- [FIX 1] 修正API调用 ---
-        // 使用 saveFile 并提供正确的命名参数
-        final result = await SaverGallery.saveFile(
-          filePath: imagePath,
-          fileName: 'processed_image_${DateTime.now().millisecondsSinceEpoch}.png',
-          skipIfExists: true, // 安全的默认值
-          androidRelativePath: "Pictures/ImageOCR",
-        );
-
-        if (!context.mounted) return;
+    if (!status.isGranted && !status.isLimited) {
+      if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(result.isSuccess ? '已保存到相册' : '保存失败')),
+          const SnackBar(content: Text('需要相册权限才能保存图片')),
         );
-      } catch (e) {
-        if (!context.mounted) return;
+      }
+      return;
+    }
+
+    try {
+      // 直接调用gal插件保存，并使用全局常量指定相册名
+      // 无需任何手动文件复制或路径管理
+      await Gal.putImage(imagePath, album: AppConstants.imageAlbumName);
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已保存到相册的 ${AppConstants.imageAlbumName} 文件夹')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('保存失败: $e')),
         );
       }
-    } else {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('需要存储权限才能保存图片')),
-      );
     }
   }
 

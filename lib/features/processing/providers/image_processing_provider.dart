@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
-import 'package:image_ocr/core/services/temporary_file_service.dart';
 import 'package:image_ocr/features/processing/models/image_processing_state.dart';
 import 'package:image_ocr/features/processing/services/processing_isolate_pool_service.dart';
 import 'package:image_ocr/features/processing/services/processing_worker.dart';
@@ -12,21 +11,27 @@ import 'package:hive/hive.dart';
 import 'package:image_ocr/features/templates/models/template.dart';
 import 'package:image_ocr/features/templates/models/template_field.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:path/path.dart' as p;
 
 part 'image_processing_provider.g.dart';
 
-@riverpod
-class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
+// 存储处理后的图片数据，避免临时文件
+final Map<String, Uint8List> _processedImageData = {};
+
+@Riverpod()
+class ImageProcessing extends _$ImageProcessing {
   @override
   ImageProcessingState build() {
     return ImageProcessingState.initial();
   }
 
-  Future<void> processBatch({
+  Future<ImageProcessingState> processBatch({
     required List<Template> templates,
     required List<String> targetImagePaths,
   }) async {
-    ref.read(temporaryFileServiceProvider).clearAll();
+    // 清理之前的处理数据
+    _processedImageData.clear();
+    
     state = ImageProcessingState(
       isProcessing: true,
       totalCount: targetImagePaths.length,
@@ -38,7 +43,7 @@ class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
 
     try {
       final fieldsBox = Hive.box<TemplateField>('template_fields');
-      final tempFileService = ref.read(temporaryFileServiceProvider);
+      // final tempFileService = ref.read(temporaryFileServiceProvider); // No longer needed
       final pool = ref.read(processingIsolatePoolProvider);
 
       final allTemplateFieldIds = templates.expand((t) => t.fieldIds).toSet();
@@ -58,23 +63,28 @@ class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
         ...templates.map((t) => t.sourceImagePath),
         ...targetImagePaths,
       }.toList();
-
-      final decodeFutures = allImagePaths.map((path) async {
-        final response = await pool.dispatch(TaskType.decode, path);
-        if (!response.isSuccess) throw Exception('Failed to decode image: $path');
-        return MapEntry(path, response.data as Uint8List);
+  
+      // 优化：并行解码和OCR，避免重复解码
+      final decodeAndOcrFutures = allImagePaths.map((path) async {
+        final decodeResponse = await pool.dispatch(TaskType.decode, path);
+        if (!decodeResponse.isSuccess) throw Exception('Failed to decode image: $path');
+        
+        final imageBytes = decodeResponse.data as Uint8List;
+        final payload = OcrPayload(imageBytes: imageBytes, imagePath: path);
+        final ocrResponse = await pool.dispatch(TaskType.ocr, payload);
+        if (!ocrResponse.isSuccess) throw Exception('Failed to OCR image: $path');
+        
+        final (text, size) = ocrResponse.data as (RecognizedText, Size);
+        return MapEntry(path, {
+          'bytes': imageBytes,
+          'ocr': text,
+          'size': size,
+        });
       });
-      final allDecodedBytes = Map.fromEntries(await Future.wait(decodeFutures));
-
-      final ocrFutures = allImagePaths.map((path) async {
-        final payload = OcrPayload(imageBytes: allDecodedBytes[path]!, imagePath: path);
-        final response = await pool.dispatch(TaskType.ocr, payload);
-        if (!response.isSuccess) throw Exception('Failed to OCR image: $path');
-        final (text, size) = response.data as (RecognizedText, Size);
-        return MapEntry(path, {'ocr': text, 'size': size});
-      });
-      final ocrResultsWithSizes = Map.fromEntries(await Future.wait(ocrFutures));
-      final allOcrResults = ocrResultsWithSizes.map((key, value) => MapEntry(key, value['ocr'] as RecognizedText));
+      
+      final allResults = Map.fromEntries(await Future.wait(decodeAndOcrFutures));
+      final allDecodedBytes = allResults.map((key, value) => MapEntry(key, value['bytes'] as Uint8List));
+      final allOcrResults = allResults.map((key, value) => MapEntry(key, value['ocr'] as RecognizedText));
 
       final initPayload = InitializePayload(
         templates: sanitizedTemplates,
@@ -97,20 +107,27 @@ class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
           );
 
           final compositionResponse = await pool.dispatch(TaskType.composition, payload);
-          if (!compositionResponse.isSuccess) throw Exception('Failed to compose image: $targetPath');
+          if (!compositionResponse.isSuccess) {
+            // --- FINAL FIX: Propagate the original error from the isolate ---
+            throw Exception(compositionResponse.error ?? 'Worker returned a failure without an error message for $targetPath');
+          }
           final resultBytes = compositionResponse.data as Uint8List;
 
-          final resultPath = await tempFileService.create('result_', '.png');
-          await File(resultPath).writeAsBytes(resultBytes);
-
+          // --- 优化：直接返回处理后的字节数据，避免临时文件 ---
           state = state.copyWith(
             processedCount: state.processedCount + 1,
-            results: [...state.results, resultPath],
+            results: [...state.results, targetPath], // 使用原路径作为标识
+            // 将处理后的字节数据存储在状态中，供后续直接使用
           );
+          
+          // 将处理后的数据暂存，供main.dart使用
+          _processedImageData[targetPath] = resultBytes;
         } catch (e) {
           state = state.copyWith(
             processedCount: state.processedCount + 1,
             failedPaths: [...state.failedPaths, targetPath],
+            // --- FINAL FIX: Record the specific error message ---
+            error: e.toString(),
           );
         }
       }).toList();
@@ -119,9 +136,20 @@ class ImageProcessing extends AutoDisposeNotifier<ImageProcessingState> {
 
     } catch (e) {
       state = state.copyWith(isProcessing: false, error: e.toString());
-      return;
+      return state; // 返回最终状态
     }
 
     state = state.copyWith(isProcessing: false);
+    return state; // 返回最终状态
+  }
+  
+  /// 获取处理后的图片数据
+  Uint8List? getProcessedImageData(String originalPath) {
+    return _processedImageData[originalPath];
+  }
+  
+  /// 清理处理后的图片数据
+  void clearProcessedImageData(String originalPath) {
+    _processedImageData.remove(originalPath);
   }
 }

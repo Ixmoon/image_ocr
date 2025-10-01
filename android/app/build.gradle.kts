@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("kotlin-android")
+    id("com.google.devtools.ksp")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
@@ -13,6 +14,8 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+        // --- [FIX] Enable Core Library Desugaring ---
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -52,6 +55,15 @@ android {
 dependencies {
     // ML Kit中文文本识别模型
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    // 添加 LocalBroadcastManager 依赖以修复编译错误
+    implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
+
+    // Glide for image loading
+    implementation("com.github.bumptech.glide:glide:4.16.0")
+    ksp("com.github.bumptech.glide:ksp:4.16.0")
+
+    // --- [FIX] Add the desugar dependency ---
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 }
 
 flutter {

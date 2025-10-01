@@ -34,7 +34,6 @@
 // This architecture eliminates all gesture and build-context conflicts, providing
 // a stable and reliable solution.
 //
-import 'dart:io';
 import 'package:drag_and_drop_lists/drag_and_drop_lists.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -42,13 +41,16 @@ import 'package:go_router/go_router.dart';
 import 'package:image_ocr/core/router/app_router.dart';
 import 'package:image_ocr/features/templates/models/folder.dart';
 import 'package:image_ocr/features/templates/models/template.dart';
-import 'package:collection/collection.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
+import 'package:flutter/services.dart';
+import 'package:image_ocr/core/constants/app_constants.dart';
+import 'dart:ui';
+import 'package:image_ocr/main.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:path/path.dart' as p;
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
+import 'package:gal/gal.dart';
+import 'package:image_ocr/features/home/widgets/fab_menu.dart';
 
 
 final hoveredFolderIdProvider = StateProvider<String?>((ref) => null);
@@ -67,6 +69,12 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final ImagePicker _picker = ImagePicker();
+  final Map<String, GlobalKey> _folderKeys = {};
+  
+  @override
+  void initState() {
+    super.initState();
+  }
 
   Future<void> _takePicture() async {
     // 1. 检查和请求相机��限
@@ -95,40 +103,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       // 3. 调用相机
       final XFile? photo = await _picker.pickImage(source: ImageSource.camera);
       if (photo == null) {
-        debugPrint('[拍照功能] 用户取消了拍照');
         return;
       }
 
-      // 4. 确定保存路径
-      final Directory? externalDir = await getExternalStorageDirectory();
-      if (externalDir == null) {
-        throw Exception("无法访问外部存储");
-      }
-      final String rootPath = externalDir.path.split('/Android').first;
-      final String saveDirPath = p.join(rootPath, 'Pictures', 'ImageOCR');
-      final Directory saveDir = Directory(saveDirPath);
-
-      if (!await saveDir.exists()) {
-        await saveDir.create(recursive: true);
-        debugPrint('[拍照功能] 创建保存目录: $saveDirPath');
-      }
-
-      // 5. 保存文件
-      final String fileName = 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      final String newPath = p.join(saveDirPath, fileName);
-      await photo.saveTo(newPath);
+      // 4. 直接使用 Gal 保存图片到指定相册
+      await Gal.putImage(photo.path, album: AppConstants.imageAlbumName);
       
-      debugPrint('[拍照功能] 照片已保存至: $newPath');
-
-      // 6. 用户反馈
+      // 5. 用户反馈
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('照片已保存至 Pictures/ImageOCR')),
+          const SnackBar(content: Text('照片已保存至 ${AppConstants.imageAlbumName}')),
         );
       }
 
     } catch (e) {
-      debugPrint('[拍照功能] 发生错误: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -141,41 +129,96 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Future<void> _showOverlay() async {
+    // This button now also uses the main screenshot flow.
+    // The overlay itself will be simplified to just trigger the Riverpod state.
+    await _triggerScreenshotFlow(showOverlay: true);
+  }
+
+  Future<void> _triggerScreenshotFlow({bool showOverlay = false}) async {
+    const MethodChannel screenshotChannel = MethodChannel('com.lxmoon.image_ocr/screenshot');
     try {
-      final bool? isGranted = await FlutterOverlayWindow.isPermissionGranted();
-      if (isGranted != true) {
-        final bool? success = await FlutterOverlayWindow.requestPermission();
-        if (success != true) {
-          debugPrint('[悬浮窗] 用户拒绝了悬浮窗权限');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('需要悬浮窗权限才能使用此功能')),
-            );
-          }
-          return;
+      // 1. Check for Accessibility permission
+      final bool isGranted = await screenshotChannel.invokeMethod('checkAccessibilityPermission');
+
+      if (!isGranted) {
+        if (mounted) {
+          await showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('需要无障碍服务权限'),
+              content: const Text('为了在任何界面都能响应截屏，需要您在系统设置中开启本应用的无障碍服务。'),
+              actions: [
+                TextButton(
+                  child: const Text('取消'),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+                FilledButton(
+                  child: const Text('去开启'),
+                  onPressed: () {
+                    screenshotChannel.invokeMethod('requestAccessibilityPermission');
+                    Navigator.of(context).pop();
+                  },
+                ),
+              ],
+            ),
+          );
         }
+        return; // Stop the flow if permission is not granted.
       }
 
-      debugPrint('[悬浮窗] 开始显示悬浮窗...');
-      
-      if (await FlutterOverlayWindow.isActive()) return;
-      
-      await FlutterOverlayWindow.showOverlay(
-        enableDrag: true,
-        overlayTitle: "截屏悬浮窗",
-        overlayContent: '正在运行...',
-        flag: OverlayFlag.defaultFlag,
-        visibility: NotificationVisibility.visibilityPublic,
-        height: 60,
-        width: 60,
-        startPosition: const OverlayPosition(50, 200),
-      );
-      debugPrint('[悬浮窗] 悬浮窗显示完成');
-    } catch (e) {
-      debugPrint('[悬浮窗] 显示悬浮窗时发生错误: $e');
+      // 2. If permission is granted, decide whether to show overlay or take screenshot directly
+      if (showOverlay) {
+        // --- [FIX] Ensure overlay permission is granted before showing ---
+        final hasPermission = await FlutterOverlayWindow.isPermissionGranted();
+        if (!hasPermission) {
+          final granted = await FlutterOverlayWindow.requestPermission();
+          // --- [FIX] Handle nullable boolean. `granted != true` covers both false and null. ---
+          if (granted != true) {
+            return;
+          }
+        }
+
+        if (!await FlutterOverlayWindow.isActive()) {
+          // --- [ULTIMATE FIX] Use a context-independent method to get DPR ---
+          // This avoids issues where the widget's context might be stale when called from a listener.
+          final overlayState = ref.read(overlayStateToRestoreProvider);
+          final dpr = PlatformDispatcher.instance.views.first.devicePixelRatio;
+
+          final logicalWidth = overlayState.isExpanded ? 350 : 60;
+          final logicalHeight = overlayState.isExpanded ? 600 : 60;
+
+          final physicalWidth = (logicalWidth * dpr).round();
+          final physicalHeight = (logicalHeight * dpr).round();
+
+          await FlutterOverlayWindow.showOverlay(
+            enableDrag: true,
+            overlayTitle: "截屏悬浮窗",
+            overlayContent: '正在运行...',
+            flag: OverlayFlag.defaultFlag,
+            visibility: NotificationVisibility.visibilityPublic,
+            height: physicalHeight,
+            width: physicalWidth,
+            startPosition: const OverlayPosition(0, 0),
+          );
+        }
+      } else {
+        // This branch is not used in the current overlay-first workflow.
+        // It's kept for potential future features like a 'quick screenshot' button
+        // directly within the app, but the SnackBar is removed to avoid confusion.
+        await screenshotChannel.invokeMethod('takeScreenshot');
+      }
+
+    } on PlatformException catch (e) {
+      final errorMessage = e.message ?? '未知原生错误';
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('启动悬浮窗失败: $e')),
+          SnackBar(content: Text('操作失败: $errorMessage')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('发生未知错误: $e')),
         );
       }
     }
@@ -183,6 +226,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // --- Screenshot Request Listener ---
+    ref.listen<bool>(screenshotRequestedProvider, (previous, next) {
+      if (next == true) {
+        ref.read(screenshotRequestedProvider.notifier).state = false;
+        _triggerScreenshotFlow();
+      }
+    });
+
     final navigationStack = ref.watch(folderNavigationStackProvider);
     final currentFolderId = navigationStack.last;
     final contentsAsyncValue = ref.watch(folderContentsProvider(currentFolderId));
@@ -208,32 +259,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (err, stack) => Center(child: Text('加载失败: $err')),
         data: (contents) {
-          // Clean up stale entries in the folderRectsProvider after the frame is built.
-          final onScreenFolderIds = contents.whereType<Folder>().map((f) => f.id).toSet();
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            // We need to check if the widget is still mounted before accessing ref.
-            if (context.mounted) {
-              final rectsNotifier = ref.read(folderRectsProvider.notifier);
-              final currentKeys = rectsNotifier.state.keys.toSet();
-
-              // Avoid unnecessary updates if the keys are already in sync.
-              if (!const SetEquality().equals(currentKeys, onScreenFolderIds)) {
-                rectsNotifier.update((state) {
-                  final newState = Map<String, Rect>.from(state);
-                  newState.removeWhere((key, value) => !onScreenFolderIds.contains(key));
-                  return newState;
-                });
-              }
-            }
-          });
-
           if (contents.isEmpty && navigationStack.length <= 1) {
             return const _EmptyState();
+          }
+          
+          // --- Performance Optimization ---
+          // Instead of having each list item report its own bounds on every build,
+          // we now manage GlobalKeys here and calculate all bounds at once, only
+          // when a drag operation begins. This significantly reduces build-time
+          // overhead and widget rebuilds.
+          final onScreenFolderIds = contents.whereType<Folder>().map((f) => f.id).toSet();
+          _folderKeys.removeWhere((id, key) => !onScreenFolderIds.contains(id));
+          for (final folder in contents.whereType<Folder>()) {
+            _folderKeys.putIfAbsent(folder.id, () => GlobalKey());
           }
 
           final contentItems = contents.map((item) {
             final childWidget = item is Folder
-                ? _FolderListItem(folder: item)
+                ? _FolderListItem(folder: item, key: _folderKeys[item.id]!)
                 : _TemplateListItem(template: item as Template);
             return DragAndDropItem(child: childWidget);
           }).toList();
@@ -262,9 +305,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         ref.read(isDraggingProvider.notifier).state = isDragging;
                         if (isDragging) {
                           ref.read(draggedItemProvider.notifier).state = item;
+                          
+                          // --- Performance Optimization: Calculate all rects on drag start ---
+                          final newRects = <String, Rect>{};
+                          _folderKeys.forEach((folderId, key) {
+                            final renderBox = key.currentContext?.findRenderObject() as RenderBox?;
+                            if (renderBox != null && renderBox.hasSize) {
+                              final rect = renderBox.localToGlobal(Offset.zero) & renderBox.size;
+                              newRects[folderId] = rect;
+                            }
+                          });
+                          ref.read(folderRectsProvider.notifier).state = newRects;
+
                         } else {
                           ref.read(hoveredFolderIdProvider.notifier).state = null;
                           ref.read(draggedItemProvider.notifier).state = null;
+                          // Clear rects when drag ends to free up memory and prevent stale data.
+                          ref.read(folderRectsProvider.notifier).state = {};
                         }
                       },
                       // This callback is no longer used for dropping on folders.
@@ -288,44 +345,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           );
         },
       ),
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FloatingActionButton.extended(
-            heroTag: 'screenshot_fab',
-            onPressed: _showOverlay,
-            icon: const Icon(Icons.screenshot_monitor),
-            label: const Text('截屏悬浮窗'),
-          ),
-          const SizedBox(height: 16),
-          FloatingActionButton.extended(
-            heroTag: 'take_picture_fab',
-            onPressed: _takePicture,
-            icon: const Icon(Icons.camera_alt_outlined),
-            label: const Text('拍照'),
-          ),
-          const SizedBox(height: 16),
-          FloatingActionButton.extended(
-            heroTag: 'apply_template_fab',
-            onPressed: () => context.push(AppRouter.applyTemplatePath),
-            icon: const Icon(Icons.layers_outlined),
-            label: const Text('应用模板'),
-          ),
-          const SizedBox(height: 16),
-          FloatingActionButton.extended(
-            heroTag: 'create_template_fab',
-            onPressed: () {
-              final currentFolderId = ref.read(currentFolderIdProvider);
-              ref.read(templateCreationProvider.notifier).createNew(folderId: currentFolderId);
-              context.push(AppRouter.createTemplatePath);
-            },
-            icon: const Icon(Icons.add),
-            label: const Text('创建模板'),
-          ),
-        ],
+      floatingActionButton: FabMenu(
+        onTakePicture: _takePicture,
+        onShowOverlay: _showOverlay,
       ),
     );
   }
+
 }
 
 // --- Overlay for Drop Targets ---
@@ -423,51 +449,22 @@ class _DragTargetOverlay extends ConsumerWidget {
 
 class _FolderListItem extends ConsumerStatefulWidget {
   final Folder folder;
-  const _FolderListItem({required this.folder});
+  const _FolderListItem({required this.folder, super.key});
 
   @override
   ConsumerState<_FolderListItem> createState() => _FolderListItemState();
 }
 
 class _FolderListItemState extends ConsumerState<_FolderListItem> {
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _reportBounds());
-  }
-
-  @override
-  void didUpdateWidget(covariant _FolderListItem oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _reportBounds());
-  }
-
-  @override
-  void dispose() {
-    // The cleanup logic has been moved to HomeScreen to avoid "ref" access after dispose.
-    super.dispose();
-  }
-
-  void _reportBounds() {
-    if (!mounted) return;
-    final renderBox = context.findRenderObject() as RenderBox?;
-    if (renderBox != null && renderBox.hasSize) {
-      // Report the global position. The overlay will use it correctly.
-      final rect = renderBox.localToGlobal(Offset.zero) & renderBox.size;
-      ref.read(folderRectsProvider.notifier).update((state) {
-        if (state[widget.folder.id] == rect) return state;
-        final newState = Map<String, Rect>.from(state);
-        newState[widget.folder.id] = rect;
-        return newState;
-      });
-    }
-  }
+  // --- Performance Optimization ---
+  // All bounds reporting logic (_reportBounds, initState, didUpdateWidget, dispose,
+  // and the post-frame callback in build) has been removed from this widget.
+  // The responsibility is now centralized in the HomeScreen, which calculates
+  // all folder positions at once when a drag starts. This prevents every
+  // single folder item from triggering state updates on every frame.
 
   @override
   Widget build(BuildContext context) {
-    // Report bounds after each build to handle layout changes (e.g., scrolling).
-    WidgetsBinding.instance.addPostFrameCallback((_) => _reportBounds());
-
     final hoveredFolderId = ref.watch(hoveredFolderIdProvider);
     final isHighlighted = hoveredFolderId == widget.folder.id;
     final theme = Theme.of(context);

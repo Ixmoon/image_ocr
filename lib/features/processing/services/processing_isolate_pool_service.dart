@@ -3,7 +3,6 @@ import 'dart:collection';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart'; // CRITICAL FIX: Import for RootIsolateToken
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
@@ -72,12 +71,14 @@ class ProcessingIsolatePoolService {
             await dispatch(TaskType.ocr, ocrPayload);
           }
         } catch (e) {
+          // Individual warmup failures are not critical.
         }
       }).toList();
       
       await Future.wait(warmupFutures);
       await File(dummyImagePath).delete();
     } catch (e) {
+      // Top-level warmup failure is not critical.
     }
   }
 
@@ -105,6 +106,7 @@ class ProcessingIsolatePoolService {
         _allWorkerPorts.add(workerSendPort);
         _idleWorkers.add(workerSendPort);
       } catch (e) {
+        // Failed to spawn an isolate, will proceed with fewer workers.
       }
     }
 

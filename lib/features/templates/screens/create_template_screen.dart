@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:image/image.dart' as img;
 import 'package:image_ocr/core/router/app_router.dart';
 import 'package:image_ocr/features/processing/services/processing_isolate_pool_service.dart';
 import 'package:image_ocr/features/processing/services/processing_worker.dart';
@@ -209,12 +208,14 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
               icon: const Icon(Icons.save),
               tooltip: '保存模板',
               onPressed: () async {
+                final scaffoldMessenger = ScaffoldMessenger.of(context);
+                final navigator = Navigator.of(context);
                 await templateNotifier.save();
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('模板已保存'), duration: Duration(seconds: 2)),
-                  );
-                }
+                if (!mounted) return;
+                scaffoldMessenger.showSnackBar(
+                  const SnackBar(content: Text('模板已保存'), duration: Duration(seconds: 2)),
+                );
+                navigator.pop();
               },
             ),
         ],
@@ -233,12 +234,12 @@ class _CreateTemplateViewState extends ConsumerState<_CreateTemplateView> {
           ? FloatingActionButton.extended(
               onPressed: () async {
                 // 保存并跳转
+                final router = GoRouter.of(context);
                 await templateNotifier.save();
+                if (!mounted) return;
                 // 获取最新的模板状态以传递
                 final latestTemplate = ref.read(templateCreationProvider);
-                if (context.mounted) {
-                  context.push(AppRouter.applyTemplatePath, extra: latestTemplate);
-                }
+                router.push(AppRouter.applyTemplatePath, extra: latestTemplate);
               },
               icon: const Icon(Icons.layers_outlined),
               label: const Text('应用模板'),

@@ -1,0 +1,4 @@
+
+<resources>
+    <string name="accessibility_service_description">此服务用于截取屏幕内容以进行图像处理。开启此服务后，应用将能够响应您的指令进行截屏，无需每次都请求权限。</string>
+</resources>
