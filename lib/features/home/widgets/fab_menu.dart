@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_ocr/core/router/app_router.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
+import 'package:image_ocr/main.dart'; // Import to access isRootGrantedProvider
 
 // Provider to manage the FAB menu's open/closed state.
 final isFabMenuOpenProvider = StateProvider<bool>((ref) => true);
@@ -10,11 +11,13 @@ final isFabMenuOpenProvider = StateProvider<bool>((ref) => true);
 class FabMenu extends ConsumerWidget {
   final VoidCallback onTakePicture;
   final VoidCallback onShowOverlay;
+  final VoidCallback onRequestRoot;
 
   const FabMenu({
     super.key,
     required this.onTakePicture,
     required this.onShowOverlay,
+    required this.onRequestRoot,
   });
 
   @override
@@ -56,6 +59,22 @@ class FabMenu extends ConsumerWidget {
             icon: const Icon(Icons.screenshot_monitor),
             onPressed: onShowOverlay,
             heroTag: 'screenshot_fab',
+          ),
+          const SizedBox(height: 12),
+          // --- [NEW] Root Status/Request FAB Action ---
+          Consumer(
+            builder: (context, ref, child) {
+              final isRootGranted = ref.watch(isRootGrantedProvider);
+              return _FabAction(
+                label: isRootGranted ? 'Root 模式已激活' : '请求 Root 权限',
+                icon: Icon(
+                  isRootGranted ? Icons.check_circle : Icons.security,
+                  color: isRootGranted ? Colors.green : null,
+                ),
+                onPressed: isRootGranted ? () {} : onRequestRoot, // Only allow request if not granted
+                heroTag: 'root_fab',
+              );
+            },
           ),
           const SizedBox(height: 20),
         ],

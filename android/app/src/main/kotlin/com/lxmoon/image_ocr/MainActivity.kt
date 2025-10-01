@@ -38,39 +38,25 @@ class MainActivity: FlutterFragmentActivity() {
 
     private val handler = Handler(Looper.getMainLooper())
     
-    // 缓存截屏结果，防止在应用不在前台时丢失
-    private var pendingScreenshotResult: Map<String, Any>? = null
-
+    // [最终修复] 移除所有缓存逻辑，Activity 只负责监听和转发，不持有状态。
     private val screenshotReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            val tag = "MainActivity"
             if (intent?.action == ScreenshotService.ACTION_SCREENSHOT_RESULT) {
                 val filePath = intent.getStringExtra(ScreenshotService.EXTRA_FILE_PATH)
                 val errorMessage = intent.getStringExtra(ScreenshotService.EXTRA_ERROR_MESSAGE)
 
-                val result = if (filePath != null) {
-                    mapOf("type" to "success", "path" to filePath)
-                } else {
-                    mapOf("type" to "error", "error" to (errorMessage ?: "未知错误"))
-                }
-                
-                // 尝试立即发送结果
-                if (eventSink != null) {
-                    try {
-                        if (filePath != null) {
-                            eventSink?.success(result)
-                        } else {
-                            eventSink?.error("CAPTURE_FAILED", errorMessage, null)
-                        }
-                        //Log.d(tag, "Screenshot result sent immediately")
-                    } catch (e: Exception) {
-                        //Log.w(tag, "Failed to send result immediately, caching: ${e.message}")
-                        pendingScreenshotResult = result
+                // [最终修复] 收到广播后，直接通过当前有效的 EventSink 发送给 Flutter。
+                // 如果 eventSink 为 null (Flutter UI 不可见)，则消息被安全地忽略。
+                // 这种方式保证了不会��一个无效的 Sink 发送数据，从而避免闪退。
+                eventSink?.let { sink ->
+                    if (filePath != null) {
+                        val result = mapOf("type" to "success", "path" to filePath)
+                        sink.success(result)
+                        //Log.d("MainActivity", "Broadcast received and forwarded to Flutter: SUCCESS")
+                    } else {
+                        sink.error("CAPTURE_FAILED", errorMessage ?: "未知错误", null)
+                        //Log.d("MainActivity", "Broadcast received and forwarded to Flutter: ERROR")
                     }
-                } else {
-                    // EventSink不可用，缓存结果等待恢复
-                    pendingScreenshotResult = result
-                    //Log.d(tag, "EventSink not available, result cached")
                 }
             }
         }
@@ -83,28 +69,14 @@ class MainActivity: FlutterFragmentActivity() {
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, EVENT_CHANNEL).setStreamHandler(
             object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    // [最终修复] onListen 只负责设置 sink，移除所有待处理结果的逻辑。
                     MainActivity.eventSink = events
-                    
-                    // 如果有待处理的结果，立即发送
-                    pendingScreenshotResult?.let { result ->
-                        handler.post {
-                            try {
-                                if (result["type"] == "success") {
-                                    eventSink?.success(result)
-                                } else {
-                                    eventSink?.error("CAPTURE_FAILED", result["error"] as? String, null)
-                                }
-                                pendingScreenshotResult = null
-                                //Log.d("MainActivity", "Pending screenshot result sent")
-                            } catch (e: Exception) {
-                                Log.e("MainActivity", "Failed to send pending result: ${e.message}")
-                            }
-                        }
-                    }
+                    //Log.d("MainActivity", "EventChannel listener attached.")
                 }
 
                 override fun onCancel(arguments: Any?) {
                     MainActivity.eventSink = null
+                    //Log.d("MainActivity", "EventChannel listener detached.")
                 }
             }
         )
@@ -121,8 +93,8 @@ class MainActivity: FlutterFragmentActivity() {
                     result.success(null)
                 }
                 "takeScreenshot" -> {
-                    // 尝试多种方式触发截屏
-                    val success = triggerScreenshotMultipleWays()
+                    // [核心加固] 改为使用最可靠的 Intent 方式
+                    val success = triggerScreenshotViaIntent()
                     result.success(success)
                 }
                 "getPicturesDirectory" -> {
@@ -135,6 +107,14 @@ class MainActivity: FlutterFragmentActivity() {
                         result.error("UNAVAILABLE", "Could not get public pictures directory.", e.toString())
                     }
                 }
+                // [NEW] Add Root permission check
+                "checkRootPermission" -> {
+                    result.success(isRootAvailable())
+                }
+                // [NEW] Add Root permission request
+                "requestRootPermission" -> {
+                    requestRootPermission(result)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -144,6 +124,8 @@ class MainActivity: FlutterFragmentActivity() {
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
         checkAndRequestNotificationPermission()
+        // [核心加固] 在 Activity 创建时就确保服务正在运行
+        startScreenshotService()
     }
 
     override fun onResume() {
@@ -179,32 +161,21 @@ class MainActivity: FlutterFragmentActivity() {
     }
     
     /**
-     * 使用多种方式尝试触发截屏，提高成功率
+     * [核心加固] 使用 Intent Action 触发截屏，这是最可靠的方式
      */
-    private fun triggerScreenshotMultipleWays(): Boolean {
-        var success = false
-        
-        // 方式1: 通过事件处理器
-        try {
-            ScreenshotService.eventHandler?.invoke("takeScreenshot")
-            success = true
-            //Log.d("MainActivity", "Screenshot triggered via event handler")
-        } catch (e: Exception) {
-            //Log.w("MainActivity", "Event handler failed: ${e.message}")
-        }
-        
-        // 方式2: 直接调用服务实例
-        if (!success) {
-            try {
-                ScreenshotService.serviceInstance?.triggerScreenshot()
-                success = true
-                //Log.d("MainActivity", "Screenshot triggered via service instance")
-            } catch (e: Exception) {
-                //Log.w("MainActivity", "Service instance call failed: ${e.message}")
+    private fun triggerScreenshotViaIntent(): Boolean {
+        return try {
+            val intent = Intent(this, ScreenshotService::class.java).apply {
+                action = ScreenshotService.ACTION_TRIGGER_SCREENSHOT
             }
+            // 始终使用 startService 来发送命令，系统会处理服务是否已在运行
+            startService(intent)
+            //Log.d("MainActivity", "Screenshot command sent via Intent")
+            true
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to send screenshot command via Intent", e)
+            false
         }
-        
-        return success
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -216,6 +187,61 @@ class MainActivity: FlutterFragmentActivity() {
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         )
         return enabledServices?.contains(service) == true
+    }
+
+    /**
+     * [NEW] Checks if root access is available.
+     */
+    private fun isRootAvailable(): Boolean {
+        var process: Process? = null
+        return try {
+            process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            process.waitFor() == 0
+        } catch (e: Exception) {
+            false
+        } finally {
+            process?.destroy()
+        }
+    }
+
+    /**
+     * [NEW] Tries to execute a simple command with su to trigger the root permission prompt.
+     */
+    private fun requestRootPermission(result: MethodChannel.Result) {
+        Thread {
+            var process: Process? = null
+            try {
+                process = Runtime.getRuntime().exec(arrayOf("su", "-c", "echo 'root permission requested'"))
+                val exitCode = process.waitFor()
+                // Post the result back to the main thread
+                handler.post {
+                    result.success(exitCode == 0)
+                }
+            } catch (e: Exception) {
+                handler.post {
+                    result.success(false)
+                }
+            } finally {
+                process?.destroy()
+            }
+        }.start()
+    }
+
+    /**
+     * [核心加固] 启动无障碍服务的统一方法
+     */
+    private fun startScreenshotService() {
+        try {
+            val serviceIntent = Intent(this, ScreenshotService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            //Log.d("MainActivity", "Ensured ScreenshotService is started.")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to start ScreenshotService.", e)
+        }
     }
 
     private fun checkAndRequestNotificationPermission() {

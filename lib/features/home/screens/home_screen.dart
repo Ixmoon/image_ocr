@@ -71,13 +71,54 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final ImagePicker _picker = ImagePicker();
   final Map<String, GlobalKey> _folderKeys = {};
   
+  // --- [NEW] Platform Channel for Root ---
+  static const MethodChannel _screenshotChannel = MethodChannel('com.lxmoon.image_ocr/screenshot');
+
   @override
   void initState() {
     super.initState();
+    // --- [NEW] Check root status on screen init ---
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkRootStatus();
+    });
+  }
+
+  // --- [NEW] Method to check root status ---
+  Future<void> _checkRootStatus() async {
+    try {
+      final bool isGranted = await _screenshotChannel.invokeMethod('checkRootPermission');
+      if (mounted) {
+        ref.read(isRootGrantedProvider.notifier).state = isGranted;
+      }
+    } on PlatformException {
+      // Handle error if needed, e.g., show a snackbar
+      if (mounted) {
+        ref.read(isRootGrantedProvider.notifier).state = false;
+      }
+    }
+  }
+
+  // --- [NEW] Method to request root permission ---
+  Future<void> _requestRootPermission() async {
+    try {
+      final bool isGranted = await _screenshotChannel.invokeMethod('requestRootPermission');
+      if (mounted) {
+        ref.read(isRootGrantedProvider.notifier).state = isGranted;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(isGranted ? 'Root 权限已授予' : 'Root 权限被拒绝')),
+        );
+      }
+    } on PlatformException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('请求 Root 权限失败: ${e.message}')),
+        );
+      }
+    }
   }
 
   Future<void> _takePicture() async {
-    // 1. 检查和请求相机��限
+    // 1. 检查和请求相机权限
     final cameraStatus = await Permission.camera.request();
     if (!cameraStatus.isGranted) {
       if (mounted) {
@@ -134,79 +175,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     await _triggerScreenshotFlow(showOverlay: true);
   }
 
+  /// --- [REFACTORED] Centralized Screenshot and Overlay Logic ---
   Future<void> _triggerScreenshotFlow({bool showOverlay = false}) async {
-    const MethodChannel screenshotChannel = MethodChannel('com.lxmoon.image_ocr/screenshot');
     try {
-      // 1. Check for Accessibility permission
-      final bool isGranted = await screenshotChannel.invokeMethod('checkAccessibilityPermission');
+      // 1. Check for necessary permissions (Root or Accessibility)
+      final hasPermission = await _ensureScreenshotPermission();
+      if (!hasPermission || !mounted) return;
 
-      if (!isGranted) {
-        if (mounted) {
-          await showDialog(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: const Text('需要无障碍服务权限'),
-              content: const Text('为了在任何界面都能响应截屏，需要您在系统设置中开启本应用的无障碍服务。'),
-              actions: [
-                TextButton(
-                  child: const Text('取消'),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-                FilledButton(
-                  child: const Text('去开启'),
-                  onPressed: () {
-                    screenshotChannel.invokeMethod('requestAccessibilityPermission');
-                    Navigator.of(context).pop();
-                  },
-                ),
-              ],
-            ),
-          );
-        }
-        return; // Stop the flow if permission is not granted.
-      }
-
-      // 2. If permission is granted, decide whether to show overlay or take screenshot directly
+      // 2. If the goal is to show the overlay, do that and stop.
       if (showOverlay) {
-        // --- [FIX] Ensure overlay permission is granted before showing ---
-        final hasPermission = await FlutterOverlayWindow.isPermissionGranted();
-        if (!hasPermission) {
-          final granted = await FlutterOverlayWindow.requestPermission();
-          // --- [FIX] Handle nullable boolean. `granted != true` covers both false and null. ---
-          if (granted != true) {
-            return;
-          }
-        }
-
-        if (!await FlutterOverlayWindow.isActive()) {
-          // --- [ULTIMATE FIX] Use a context-independent method to get DPR ---
-          // This avoids issues where the widget's context might be stale when called from a listener.
-          final overlayState = ref.read(overlayStateToRestoreProvider);
-          final dpr = PlatformDispatcher.instance.views.first.devicePixelRatio;
-
-          final logicalWidth = overlayState.isExpanded ? 350 : 60;
-          final logicalHeight = overlayState.isExpanded ? 600 : 60;
-
-          final physicalWidth = (logicalWidth * dpr).round();
-          final physicalHeight = (logicalHeight * dpr).round();
-
-          await FlutterOverlayWindow.showOverlay(
-            enableDrag: true,
-            overlayTitle: "截屏悬浮窗",
-            overlayContent: '正在运行...',
-            flag: OverlayFlag.defaultFlag,
-            visibility: NotificationVisibility.visibilityPublic,
-            height: physicalHeight,
-            width: physicalWidth,
-            startPosition: const OverlayPosition(0, 0),
-          );
-        }
-      } else {
-        // This branch is not used in the current overlay-first workflow.
-        // It's kept for potential future features like a 'quick screenshot' button
-        // directly within the app, but the SnackBar is removed to avoid confusion.
-        await screenshotChannel.invokeMethod('takeScreenshot');
+        await _launchOverlay();
+        return;
       }
+
+      // 3. If the goal is to take a screenshot from the main app UI
+      //    (This is a placeholder for a potential future feature,
+      //     as the primary flow is now via the overlay)
+      _sendMessageToMainApp('request_screenshot_only', {});
+
 
     } on PlatformException catch (e) {
       final errorMessage = e.message ?? '未知原生错误';
@@ -224,15 +210,96 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+  /// Helper to check and request screenshot permissions.
+  /// Returns true if permission is granted (either Root or Accessibility).
+  Future<bool> _ensureScreenshotPermission() async {
+    final isRootGranted = ref.read(isRootGrantedProvider);
+    if (isRootGranted) return true;
+
+    final bool isAccessibilityGranted = await _screenshotChannel.invokeMethod('checkAccessibilityPermission');
+    if (isAccessibilityGranted) return true;
+
+    if (mounted) {
+      return await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('需要无障碍服务权限'),
+          content: const Text('为了在任何界面都能响应截屏，需要您在系统设置中开启本应用的无障碍服务。'),
+          actions: [
+            TextButton(
+              child: const Text('取消'),
+              onPressed: () => Navigator.of(context).pop(false),
+            ),
+            FilledButton(
+              child: const Text('去开启'),
+              onPressed: () {
+                _screenshotChannel.invokeMethod('requestAccessibilityPermission');
+                Navigator.of(context).pop(false); // Assume user needs to enable it manually
+              },
+            ),
+          ],
+        ),
+      ) ?? false;
+    }
+    return false;
+  }
+
+  /// Helper to launch the overlay window.
+  Future<void> _launchOverlay() async {
+    final hasPermission = await FlutterOverlayWindow.isPermissionGranted();
+    if (!hasPermission) {
+      final granted = await FlutterOverlayWindow.requestPermission();
+      if (granted != true) return;
+    }
+
+    if (!await FlutterOverlayWindow.isActive()) {
+      final overlayState = ref.read(overlayStateToRestoreProvider);
+      final dpr = PlatformDispatcher.instance.views.first.devicePixelRatio;
+      final logicalWidth = overlayState.isExpanded ? 350 : 60;
+      final logicalHeight = overlayState.isExpanded ? 600 : 60;
+      final physicalWidth = (logicalWidth * dpr).round();
+      final physicalHeight = (logicalHeight * dpr).round();
+
+      await FlutterOverlayWindow.showOverlay(
+        enableDrag: true,
+        overlayTitle: "截屏悬浮窗",
+        overlayContent: '正在运行...',
+        flag: OverlayFlag.defaultFlag,
+        visibility: NotificationVisibility.visibilityPublic,
+        height: physicalHeight,
+        width: physicalWidth,
+        startPosition: const OverlayPosition(0, 0),
+      );
+    }
+  }
+
+  /// --- [NEW] Sends a command to the main isolate via Port ---
+  void _sendMessageToMainApp(String command, Map<String, dynamic> payload) {
+    final homePort = IsolateNameServer.lookupPortByName("UI");
+    if (homePort != null) {
+      homePort.send({
+        'command': command,
+        'payload': payload,
+      });
+    } else {
+      // This case should ideally not happen if the app is running.
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法连接到主服务，请重启应用。')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // --- Screenshot Request Listener ---
-    ref.listen<bool>(screenshotRequestedProvider, (previous, next) {
-      if (next == true) {
-        ref.read(screenshotRequestedProvider.notifier).state = false;
-        _triggerScreenshotFlow();
-      }
-    });
+    // The direct screenshot trigger from the main UI is no longer needed
+    // as the primary workflow is through the overlay.
+    // ref.listen<bool>(screenshotRequestedProvider, (previous, next) {
+    //   if (next == true) {
+    //     ref.read(screenshotRequestedProvider.notifier).state = false;
+    //     _triggerScreenshotFlow();
+    //   }
+    // });
 
     final navigationStack = ref.watch(folderNavigationStackProvider);
     final currentFolderId = navigationStack.last;
@@ -348,6 +415,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       floatingActionButton: FabMenu(
         onTakePicture: _takePicture,
         onShowOverlay: _showOverlay,
+        onRequestRoot: _requestRootPermission,
       ),
     );
   }
