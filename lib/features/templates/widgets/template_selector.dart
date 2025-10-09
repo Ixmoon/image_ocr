@@ -40,84 +40,92 @@ class _TemplateSelectorState extends ConsumerState<TemplateSelector> {
 
   @override
   Widget build(BuildContext context) {
-    // 完全依赖全局状态
-    final currentFolderId = ref.watch(currentFolderIdProvider);
-    final contentsAsync = ref.watch(folderContentsProvider(currentFolderId));
+    // Handle the async nature of the navigation stack provider
+    final navigationStackAsync = ref.watch(folderNavigationStackProvider);
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // 使用独立的、可复用的面包屑组件
-        const FolderBreadcrumb(),
-        const Divider(height: 1),
-        Flexible(
-          child: contentsAsync.when(
-            loading: () => const Center(child: CircularProgressIndicator()),
-            error: (err, stack) => Center(child: Text('加载失败: $err')),
-            data: (contents) {
-              if (contents.isEmpty) return const Center(child: Text('此文件夹为空'));
-              
-              if (widget.enablePagination) {
-                // 分页模式（悬浮窗）
-                return LayoutBuilder(
-                  builder: (context, constraints) {
-                    // 動態計算每頁能顯示的項目數量
-                    _calculateItemsPerPage(constraints);
-                    
-                    final totalItems = contents.length;
-                    // 确保当前页在有效范围内
-                    _ensureValidPage(totalItems);
-                    
-                    final totalPages = (totalItems / _itemsPerPage.toDouble()).ceil();
-                    final startIndex = _currentPage * _itemsPerPage;
-                    final endIndex = (startIndex + _itemsPerPage).clamp(0, totalItems);
-                    final currentPageItems = contents.sublist(startIndex, endIndex);
-                    
-                    return Column(
-                      children: [
-                        // 列表内容
-                        Expanded(
-                          child: ListView.builder(
-                            // 为悬浮窗禁用滚动，避免手势冲突
-                            physics: const NeverScrollableScrollPhysics(),
-                            itemCount: currentPageItems.length,
-                            itemBuilder: (context, index) {
-                              final item = currentPageItems[index];
-                              if (item is Folder) {
-                                return _buildFolderItem(ref, item);
-                              } else if (item is Template) {
-                                return _buildTemplateItem(item);
-                              }
-                              return const SizedBox.shrink();
-                            },
-                          ),
-                        ),
-                        // 分页按钮在下方
-                        if (totalPages > 1) _buildPaginationControls(totalPages),
-                      ],
+    return navigationStackAsync.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (err, stack) => Center(child: Text('无法加载导航: $err')),
+      data: (navigationStack) {
+        final currentFolderId = navigationStack.last;
+        final contentsAsync = ref.watch(folderContentsProvider(currentFolderId));
+
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 使用独立的、可复用的面包屑组件
+            const FolderBreadcrumb(),
+            const Divider(height: 1),
+            Flexible(
+              child: contentsAsync.when(
+                loading: () => const Center(child: CircularProgressIndicator()),
+                error: (err, stack) => Center(child: Text('加载失败: $err')),
+                data: (contents) {
+                  if (contents.isEmpty) return const Center(child: Text('此文件夹为空'));
+
+                  if (widget.enablePagination) {
+                    // 分页模式（悬浮窗）
+                    return LayoutBuilder(
+                      builder: (context, constraints) {
+                        // 動態計算每頁能顯示的項目數量
+                        _calculateItemsPerPage(constraints);
+                        
+                        final totalItems = contents.length;
+                        // 确保当前页在有效范围内
+                        _ensureValidPage(totalItems);
+                        
+                        final totalPages = (totalItems / _itemsPerPage.toDouble()).ceil();
+                        final startIndex = _currentPage * _itemsPerPage;
+                        final endIndex = (startIndex + _itemsPerPage).clamp(0, totalItems);
+                        final currentPageItems = contents.sublist(startIndex, endIndex);
+                        
+                        return Column(
+                          children: [
+                            // 列表内容
+                            Expanded(
+                              child: ListView.builder(
+                                // 为悬浮窗禁用滚动，避免手势冲突
+                                physics: const NeverScrollableScrollPhysics(),
+                                itemCount: currentPageItems.length,
+                                itemBuilder: (context, index) {
+                                  final item = currentPageItems[index];
+                                  if (item is Folder) {
+                                    return _buildFolderItem(ref, item);
+                                  } else if (item is Template) {
+                                    return _buildTemplateItem(item);
+                                  }
+                                  return const SizedBox.shrink();
+                                },
+                              ),
+                            ),
+                            // 分页按钮在下方
+                            if (totalPages > 1) _buildPaginationControls(totalPages),
+                          ],
+                        );
+                      },
                     );
-                  },
-                );
-              } else {
-                // 正常滚动模式（其他地方）
-                return ListView.builder(
-                  // 允许正常滚动
-                  itemCount: contents.length,
-                  itemBuilder: (context, index) {
-                    final item = contents[index];
-                    if (item is Folder) {
-                      return _buildFolderItem(ref, item);
-                    } else if (item is Template) {
-                      return _buildTemplateItem(item);
-                    }
-                    return const SizedBox.shrink();
-                  },
-                );
-              }
-            },
-          ),
-        ),
-      ],
+                  } else {
+                    // 正常滚动模式（其他地方）
+                    return ListView.builder(
+                      // 允许正常滚动
+                      itemCount: contents.length,
+                      itemBuilder: (context, index) {
+                        final item = contents[index];
+                        if (item is Folder) {
+                          return _buildFolderItem(ref, item);
+                        } else if (item is Template) {
+                          return _buildTemplateItem(item);
+                        }
+                        return const SizedBox.shrink();
+                      },
+                    );
+                  }
+                },
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -225,8 +233,10 @@ class _TemplateSelectorState extends ConsumerState<TemplateSelector> {
       title: Text(folder.name),
       // 点击文件夹时，直接操作全局Provider并重置页面
       onTap: () {
-        ref.read(folderNavigationStackProvider.notifier).push(folder.id);
-        _resetToFirstPage();
+        // Now calling an async method
+        ref.read(folderNavigationStackProvider.notifier).push(folder.id).then((_) {
+          _resetToFirstPage();
+        });
       },
     );
   }

@@ -12,12 +12,14 @@ class FabMenu extends ConsumerWidget {
   final VoidCallback onTakePicture;
   final VoidCallback onShowOverlay;
   final VoidCallback onRequestRoot;
+  final VoidCallback onClearCache;
 
   const FabMenu({
     super.key,
     required this.onTakePicture,
     required this.onShowOverlay,
     required this.onRequestRoot,
+    required this.onClearCache,
   });
 
   @override
@@ -75,6 +77,13 @@ class FabMenu extends ConsumerWidget {
                 heroTag: 'root_fab',
               );
             },
+          ),
+          const SizedBox(height: 12),
+          _FabAction(
+            label: '清空缓存文件夹',
+            icon: const Icon(Icons.delete_sweep_outlined),
+            onPressed: onClearCache,
+            heroTag: 'clear_cache_fab',
           ),
           const SizedBox(height: 20),
         ],

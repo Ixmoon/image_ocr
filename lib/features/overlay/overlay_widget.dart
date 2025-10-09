@@ -1,6 +1,7 @@
 import 'dart:isolate';
 import 'dart:ui';
 import 'dart:async';
+import 'package:flutter/services.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
@@ -8,6 +9,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_ocr/features/templates/models/template.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
 import 'package:image_ocr/features/templates/widgets/template_selector.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 
 enum OverlayState { collapsed, expanded, capturing, invisible }
 
@@ -26,25 +29,33 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
   OverlayState _state = OverlayState.collapsed;
   OverlayState _previousState = OverlayState.collapsed;
   
-  // This channel is not used here, commands are sent via Isolate ports.
-  // static const MethodChannel _screenshotChannel = MethodChannel('com.example.image_ocr/screenshot');
+  // Completer for the ping-pong heartbeat check
+  Completer<bool>? _pingCompleter;
+  
+  // Channel to communicate with native Android code (MainActivity)
+  static const MethodChannel _screenshotChannel = MethodChannel('com.lxmoon.image_ocr/screenshot');
 
   @override
   void initState() {
     super.initState();
+    
+    // --- [ROBUSTNESS FIX] Read initial state from persistent storage ---
+    // This ensures the overlay starts in the correct state after a restart.
+    final box = Hive.box('app_state');
+    final isExpanded = box.get('overlay_is_expanded', defaultValue: false) as bool;
+    _state = isExpanded ? OverlayState.expanded : OverlayState.collapsed;
+    _previousState = _state;
+
     homePort ??= IsolateNameServer.lookupPortByName(_kPortNameHome);
     IsolateNameServer.registerPortWithName(_receivePort.sendPort, _kPortNameOverlay);
     
-    // 监听来自主应用的命令
+    // The single, persistent listener for all messages from the main isolate.
     _receivePort.listen((message) {
       if (message is Map<String, dynamic>) {
         final command = message['command'] as String?;
         switch (command) {
           case 'close_overlay':
             FlutterOverlayWindow.closeOverlay();
-            break;
-          case 'update_state':
-            // This logic might need adjustment based on the new state machine
             break;
           case 'screenshot_done':
             // Screenshot is done, restore previous state
@@ -53,6 +64,12 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
               _state = wasExpanded ? OverlayState.expanded : OverlayState.collapsed;
             });
             _resizeOverlay();
+            break;
+          case 'pong':
+            // Respond to the ping for the heartbeat check.
+            if (_pingCompleter != null && !_pingCompleter!.isCompleted) {
+              _pingCompleter!.complete(true);
+            }
             break;
         }
       }
@@ -73,39 +90,101 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
     });
   }
 
-  /// 截屏处理逻辑 (V2: 清晰分离命令)
-  Future<void> _handleScreenshot() async {
+  /// 拍照处理逻辑
+  Future<void> _handleTakePicture() async {
     try {
       _previousState = _state;
-      
-      setState(() {
-        _state = OverlayState.invisible;
-      });
+      setState(() { _state = OverlayState.invisible; });
       await _resizeOverlay();
-      
-      // --- 核心修复：根据是否选择模板，发送不同命令 ---
-      final selectedTemplates = ref.read(selectedTemplatesForProcessingProvider);
-      
-      if (selectedTemplates.isNotEmpty) {
-        // 截屏并处理
-        await _sendMessageToMain('request_screenshot_and_process', {
-          'wasExpanded': _previousState == OverlayState.expanded,
-          'templates': selectedTemplates.map((t) => {'templateId': t.id}).toList(),
-        });
-      } else {
-        // 仅截屏
-        await _sendMessageToMain('request_screenshot_only', {
-          'wasExpanded': _previousState == OverlayState.expanded,
-        });
+
+      final isAlive = await _isMainAppAlive();
+      if (!isAlive) {
+        debugPrint('Main app is not responding. Waking it up...');
+        await _screenshotChannel.invokeMethod('wakeUp');
+        await Future.delayed(const Duration(seconds: 2));
       }
       
-      // 恢复状态的逻辑现在由主应用在处理完成后���过 'screenshot_done' 命令触发
-      // 因此这里不再需要手动恢复
-      
+      await _sendMessageToMain('request_take_picture', {'wasExpanded': _previousState == OverlayState.expanded});
+
     } catch (e) {
-      debugPrint('截屏请求失败: $e');
-      // 出错时也要恢复状态
+      debugPrint('Take picture request failed: $e');
       await _restorePreviousState();
+    }
+  }
+
+  /// 截屏处理逻辑 (V3.1: 修复 Stream 监听错误)
+  Future<void> _handleScreenshot({bool process = false}) async {
+    try {
+      _previousState = _state;
+      setState(() { _state = OverlayState.invisible; });
+      await _resizeOverlay();
+
+      // 1. 检查主应用是否存活
+      final isAlive = await _isMainAppAlive();
+
+      if (!isAlive) {
+        // 2. 如果不存活，则唤醒它
+        debugPrint('Main app is not responding. Waking it up...');
+        try {
+          await _screenshotChannel.invokeMethod('wakeUp');
+          // 等待主应用有足够的时间启动和初始化
+          await Future.delayed(const Duration(seconds: 2));
+        } catch (e) {
+          debugPrint('Failed to wake up main app: $e');
+          await _restorePreviousState();
+          // TODO: Show an error message to the user
+          return;
+        }
+      }
+      
+      // 3. (重新)发送截图指令
+      await _sendScreenshotCommand(process: process);
+
+    } catch (e) {
+      debugPrint('Screenshot request failed: $e');
+      await _restorePreviousState();
+    }
+  }
+
+  /// 检查主应用Isolate是否存活 (Ping-Pong机制)
+  Future<bool> _isMainAppAlive() async {
+    homePort ??= IsolateNameServer.lookupPortByName(_kPortNameHome);
+    if (homePort == null) return false;
+
+    // Create a new completer for this specific ping request.
+    _pingCompleter = Completer<bool>();
+
+    // Set up a timeout for the ping.
+    final timer = Timer(const Duration(milliseconds: 800), () { // Increased timeout
+      if (!_pingCompleter!.isCompleted) {
+        _pingCompleter!.complete(false);
+        debugPrint('Ping timed out.');
+      }
+    });
+
+    // Send the ping. The response will be handled by the listener in initState.
+    homePort!.send({'command': 'ping'});
+    debugPrint('Ping sent.');
+    
+    final result = await _pingCompleter!.future;
+    timer.cancel(); // Clean up the timer
+    return result;
+  }
+
+  /// 封装发送截图指令的逻辑
+  Future<void> _sendScreenshotCommand({bool process = false}) async {
+    final selectedTemplates = ref.read(selectedTemplatesForProcessingProvider);
+    // If process is true, we must have templates selected.
+    if (process && selectedTemplates.isNotEmpty) {
+      await _sendMessageToMain('request_screenshot_and_process', {
+        'wasExpanded': _previousState == OverlayState.expanded,
+        'templates': selectedTemplates.map((t) => {'templateId': t.id}).toList(),
+      });
+    } else {
+      // Otherwise, just take a screenshot.
+      await _sendMessageToMain('request_screenshot_only', {
+        'wasExpanded': _previousState == OverlayState.expanded,
+      });
     }
   }
 
@@ -120,7 +199,6 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
       debugPrint('Message sent to main: $command');
     } else {
       debugPrint('Failed to send message: Cannot connect to main app.');
-      // 可以考虑在这里增加一些错误提示，比如弹出一个Toast
       throw Exception('无法连接到主应用');
     }
   }
@@ -140,21 +218,53 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
           : OverlayState.collapsed;
     });
     await _resizeOverlay();
+
+    final newStateIsExpanded = _state == OverlayState.expanded;
+
+    // --- [ROBUSTNESS FIX] Write the new state to persistent storage ---
+    await Hive.box('app_state').put('overlay_is_expanded', newStateIsExpanded);
+
+    // Notify the main app about the state change so it can restore correctly.
+    homePort ??= IsolateNameServer.lookupPortByName(_kPortNameHome);
+    homePort?.send({
+      'command': 'update_state',
+      'payload': {'isExpanded': newStateIsExpanded}
+    });
   }
 
   Future<void> _resizeOverlay() async {
+    // 使用 PlatformDispatcher 来安全地获取屏幕尺寸
+    final view = PlatformDispatcher.instance.views.first;
+    final screenSize = view.physicalSize / view.devicePixelRatio;
+    final screenWidth = screenSize.width;
+    final screenHeight = screenSize.height;
+
     switch (_state) {
       case OverlayState.collapsed:
-        await FlutterOverlayWindow.resizeOverlay(60, 60, true);
+        const double ballSize = 60;
+        await FlutterOverlayWindow.resizeOverlay(ballSize.toInt(), ballSize.toInt(), true);
+        
+        // 坐标系中心为 (0,0)，moveOverlay 设置的是悬浮窗的中心点
+        // X 坐标：屏幕左边缘 (-width/2) + 悬浮球半径 (ballSize/2) + 边距
+        final double x = (-screenWidth / 2) + (ballSize / 2);
+        // Y 坐标：屏幕下边缘 (height/2) - 悬浮球半径 (ballSize/2) - 边距
+        final double y = (screenHeight / 2) - (ballSize / 2) + 50;
+        
+        await FlutterOverlayWindow.moveOverlay(OverlayPosition(x, y));
         break;
       case OverlayState.expanded:
-        await FlutterOverlayWindow.resizeOverlay(350, 600, true);
+        const double windowWidth = 350;
+        const double windowHeight = 600;
+        await FlutterOverlayWindow.resizeOverlay(windowWidth.toInt(), windowHeight.toInt(), true);
+        
+        // 将展开窗口的中心点移动到屏幕中心点 (0,0)
+        await FlutterOverlayWindow.moveOverlay(const OverlayPosition(0, 0));
         break;
       case OverlayState.capturing:
         await FlutterOverlayWindow.resizeOverlay(80, 80, true);
         break;
       case OverlayState.invisible:
-        await FlutterOverlayWindow.resizeOverlay(1, 1, true);
+        await FlutterOverlayWindow.resizeOverlay(1, 1, false);
         break;
     }
   }
@@ -271,9 +381,17 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
             ),
             child: Row(
               children: [
+                 // --- [NEW] Clear Selection Button ---
+                IconButton(
+                  icon: const Icon(Icons.clear_all, color: Colors.white),
+                  tooltip: '清空已选',
+                  onPressed: () {
+                     ref.read(selectedTemplatesForProcessingProvider.notifier).state = {};
+                  },
+                ),
                 Expanded(
                   child: Padding(
-                    padding: const EdgeInsets.only(left: 16.0),
+                    padding: const EdgeInsets.only(left: 8.0),
                     child: Text(
                       '已选 ${selectedTemplates.length} 个模板',
                       style: const TextStyle(
@@ -321,17 +439,45 @@ class _OverlayWidgetState extends ConsumerState<OverlayWidget> {
           ),
           Padding(
             padding: const EdgeInsets.all(8.0),
-            child: SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.camera_alt_outlined),
+                    label: const Text('拍照'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    onPressed: _handleTakePicture,
+                  ),
                 ),
-                onPressed: _handleScreenshot,
-                child: Text(selectedTemplates.isNotEmpty ? '截屏并处理' : '仅截屏'),
-              ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.screenshot_monitor),
+                    label: const Text('仅截屏'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    onPressed: () => _handleScreenshot(process: false),
+                  ),
+                ),
+                if (selectedTemplates.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      icon: const Icon(Icons.camera_enhance),
+                      label: const Text('截屏并处理'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      onPressed: () => _handleScreenshot(process: true),
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
         ],

@@ -34,6 +34,7 @@
 // This architecture eliminates all gesture and build-context conflicts, providing
 // a stable and reliable solution.
 //
+import 'dart:async';
 import 'package:drag_and_drop_lists/drag_and_drop_lists.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -44,6 +45,7 @@ import 'package:image_ocr/features/templates/models/template.dart';
 import 'package:image_ocr/features/templates/providers/template_providers.dart';
 import 'package:flutter/services.dart';
 import 'package:image_ocr/core/constants/app_constants.dart';
+import 'dart:io';
 import 'dart:ui';
 import 'package:image_ocr/main.dart';
 import 'package:image_picker/image_picker.dart';
@@ -51,6 +53,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:gal/gal.dart';
 import 'package:image_ocr/features/home/widgets/fab_menu.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 
 
 final hoveredFolderIdProvider = StateProvider<String?>((ref) => null);
@@ -175,6 +178,52 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     await _triggerScreenshotFlow(showOverlay: true);
   }
 
+  Future<void> _clearSavedImages() async {
+    try {
+      // First, check permission status
+      var status = await Permission.manageExternalStorage.status;
+
+      // If permission is not granted, request it.
+      if (!status.isGranted) {
+        status = await Permission.manageExternalStorage.request();
+      }
+
+      // If permission is granted after returning from settings, perform cleanup
+      if (status.isGranted) {
+        // Get the directory path from the native side to ensure consistency
+        final String? dirPath = await _screenshotChannel.invokeMethod('getPicturesDirectory');
+        if (dirPath != null) {
+          final saveDir = Directory(dirPath);
+          if (await saveDir.exists()) {
+            await saveDir.delete(recursive: true);
+          }
+          // Always ensure the directory exists
+          await saveDir.create(recursive: true);
+           if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('图片保存文件夹已清空')),
+            );
+          }
+        }
+      } else {
+         if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('需要文件权限才能清空文件夹')),
+            );
+          }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('清空失败: $e'),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _triggerScreenshotFlow({bool showOverlay = false}) async {
     const MethodChannel screenshotChannel = MethodChannel('com.lxmoon.image_ocr/screenshot');
     try {
@@ -223,29 +272,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           }
         }
 
-        if (!await FlutterOverlayWindow.isActive()) {
-          // --- [ULTIMATE FIX] Use a context-independent method to get DPR ---
-          // This avoids issues where the widget's context might be stale when called from a listener.
-          final overlayState = ref.read(overlayStateToRestoreProvider);
-          final dpr = PlatformDispatcher.instance.views.first.devicePixelRatio;
-
-          final logicalWidth = overlayState.isExpanded ? 350 : 60;
-          final logicalHeight = overlayState.isExpanded ? 600 : 60;
-
-          final physicalWidth = (logicalWidth * dpr).round();
-          final physicalHeight = (logicalHeight * dpr).round();
-
-          await FlutterOverlayWindow.showOverlay(
-            enableDrag: true,
-            overlayTitle: "截屏悬浮窗",
-            overlayContent: '正在运行...',
-            flag: OverlayFlag.defaultFlag,
-            visibility: NotificationVisibility.visibilityPublic,
-            height: physicalHeight,
-            width: physicalWidth,
-            startPosition: const OverlayPosition(0, 0),
-          );
+        // --- [MODIFIED] Force restart overlay if it's already active ---
+        if (await FlutterOverlayWindow.isActive()) {
+          await FlutterOverlayWindow.closeOverlay();
+          // A short delay helps ensure the OS has time to close the window before we reopen it.
+          await Future.delayed(const Duration(milliseconds: 200));
         }
+
+        // Now, always attempt to show the overlay.
+        // --- [ROBUSTNESS FIX] Read the definitive state from persistent storage ---
+        // This ensures the correct size is used even after an app restart.
+        final box = Hive.box('app_state');
+        final isExpanded = box.get('overlay_is_expanded', defaultValue: false) as bool;
+        final dpr = PlatformDispatcher.instance.views.first.devicePixelRatio;
+
+        final logicalWidth = isExpanded ? 350 : 60;
+        final logicalHeight = isExpanded ? 600 : 60;
+
+        final physicalWidth = (logicalWidth * dpr).round();
+        final physicalHeight = (logicalHeight * dpr).round();
+
+        await FlutterOverlayWindow.showOverlay(
+          enableDrag: true,
+          overlayTitle: "截屏悬浮窗",
+          overlayContent: '正在运行...',
+          flag: OverlayFlag.defaultFlag,
+          visibility: NotificationVisibility.visibilityPublic,
+          height: physicalHeight,
+          width: physicalWidth,
+          startPosition: const OverlayPosition(0, 0),
+        );
       } else {
         // This branch is not used in the current overlay-first workflow.
         // It's kept for potential future features like a 'quick screenshot' button
@@ -279,24 +335,50 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       }
     });
 
-    final navigationStack = ref.watch(folderNavigationStackProvider);
-    final currentFolderId = navigationStack.last;
-    final contentsAsyncValue = ref.watch(folderContentsProvider(currentFolderId));
+    // --- Take Picture Request Listener ---
+    ref.listen<Completer<void>?>(takePictureRequestedProvider, (previous, completer) {
+      if (completer != null) {
+        // 使用一个异步的立即执行函数来处理拍照逻辑
+        () async {
+          try {
+            await _takePicture();
+          } finally {
+            // 确保 completer 完成，并重置 provider 状态
+            if (!completer.isCompleted) {
+              completer.complete();
+            }
+            // 检查 widget 是否仍然挂载，避免在已销毁的 widget 上更新状态
+            if (mounted) {
+              ref.read(takePictureRequestedProvider.notifier).state = null;
+            }
+          }
+        }();
+      }
+    });
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('我的模板'),
-        leading: navigationStack.length > 1
-            ? IconButton(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: () => ref.read(folderNavigationStackProvider.notifier).pop(),
-              )
-            : null,
+    final navigationStackAsync = ref.watch(folderNavigationStackProvider);
+    
+    return navigationStackAsync.when(
+      loading: () => const Scaffold(body: Center(child: CircularProgressIndicator())),
+      error: (err, stack) => Scaffold(body: Center(child: Text('无法加载导航: $err'))),
+      data: (navigationStack) {
+        final currentFolderId = navigationStack.last;
+        final contentsAsyncValue = ref.watch(folderContentsProvider(currentFolderId));
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('我的模板'),
+            leading: navigationStack.length > 1
+                ? IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: () => ref.read(folderNavigationStackProvider.notifier).pop(),
+                  )
+                : null,
         actions: [
           IconButton(
             icon: const Icon(Icons.create_new_folder_outlined),
             tooltip: '新建文件夹',
-            onPressed: () => _showCreateFolderDialog(context, ref),
+            onPressed: () => _showCreateFolderDialog(context, ref, currentFolderId),
           ),
         ],
       ),
@@ -394,10 +476,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         onTakePicture: _takePicture,
         onShowOverlay: _showOverlay,
         onRequestRoot: _requestRootPermission,
+        onClearCache: _clearSavedImages,
       ),
     );
+      },
+    );
   }
-
 }
 
 // --- Overlay for Drop Targets ---
@@ -413,7 +497,7 @@ class _DragTargetOverlay extends ConsumerWidget {
     }
 
     final folderRects = ref.watch(folderRectsProvider);
-    final currentFolderId = ref.watch(currentFolderIdProvider);
+    final navigationStackAsync = ref.watch(folderNavigationStackProvider);
     final overlayBox = context.findRenderObject() as RenderBox?;
 
     // If the overlay isn't laid out yet or has no size, don't build targets
@@ -422,70 +506,77 @@ class _DragTargetOverlay extends ConsumerWidget {
       return const SizedBox.shrink();
     }
 
-    return Stack(
-      clipBehavior: Clip.none, // This is the crucial fix for the nested clipping issue.
-      children: folderRects.entries.map((entry) {
-        final folderId = entry.key;
-        final globalRect = entry.value;
+    return navigationStackAsync.when(
+      loading: () => const SizedBox.shrink(),
+      error: (_, __) => const SizedBox.shrink(),
+      data: (navigationStack) {
+        final currentFolderId = navigationStack.last;
+        return Stack(
+          clipBehavior: Clip.none, // This is the crucial fix for the nested clipping issue.
+          children: folderRects.entries.map((entry) {
+            final folderId = entry.key;
+            final globalRect = entry.value;
 
-        // Convert the folder's global screen Rect to a local Rect relative to this Stack.
-        final localTopLeft = overlayBox.globalToLocal(globalRect.topLeft);
-        final fullLocalRect = localTopLeft & globalRect.size;
+            // Convert the folder's global screen Rect to a local Rect relative to this Stack.
+            final localTopLeft = overlayBox.globalToLocal(globalRect.topLeft);
+            final fullLocalRect = localTopLeft & globalRect.size;
 
-        // Per user's brilliant suggestion, shrink the target to the middle 80%
-        // to leave the top and bottom 10% exposed for reordering.
-        final targetHeight = fullLocalRect.height * 0.8;
-        final verticalPadding = (fullLocalRect.height - targetHeight) / 2.0;
-        
-        final targetRect = Rect.fromLTWH(
-          fullLocalRect.left,
-          fullLocalRect.top + verticalPadding,
-          fullLocalRect.width,
-          targetHeight,
+            // Per user's brilliant suggestion, shrink the target to the middle 80%
+            // to leave the top and bottom 10% exposed for reordering.
+            final targetHeight = fullLocalRect.height * 0.8;
+            final verticalPadding = (fullLocalRect.height - targetHeight) / 2.0;
+            
+            final targetRect = Rect.fromLTWH(
+              fullLocalRect.left,
+              fullLocalRect.top + verticalPadding,
+              fullLocalRect.width,
+              targetHeight,
+            );
+
+            return Positioned.fromRect(
+              rect: targetRect,
+              child: DragTarget<DragAndDropItem>(
+                builder: (context, candidateData, rejectedData) {
+                  // This is a transparent container that just detects drops.
+                  return const SizedBox.expand();
+                },
+                onWillAcceptWithDetails: (details) {
+                  final draggedItem = details.data.child;
+                  if (draggedItem is _FolderListItem && draggedItem.folder.id == folderId) {
+                    return false;
+                  }
+                  ref.read(hoveredFolderIdProvider.notifier).state = folderId;
+                  return true;
+                },
+                onLeave: (data) {
+                  ref.read(hoveredFolderIdProvider.notifier).state = null;
+                },
+                onAcceptWithDetails: (details) {
+                  ref.read(hoveredFolderIdProvider.notifier).state = null;
+
+                  final incomingItem = details.data;
+                  dynamic draggedItemEntity;
+
+                  if (incomingItem.child is _FolderListItem) {
+                    draggedItemEntity = (incomingItem.child as _FolderListItem).folder;
+                  } else if (incomingItem.child is _TemplateListItem) {
+                    draggedItemEntity = (incomingItem.child as _TemplateListItem).template;
+                  }
+
+                  if (draggedItemEntity == null) return;
+
+                  ref.read(templatesAndFoldersActionsProvider).moveItemToFolder(
+                        itemId: draggedItemEntity.id,
+                        isFolder: draggedItemEntity is Folder,
+                        sourceFolderId: currentFolderId,
+                        targetFolderId: folderId,
+                      );
+                },
+              ),
+            );
+          }).toList(),
         );
-
-        return Positioned.fromRect(
-          rect: targetRect,
-          child: DragTarget<DragAndDropItem>(
-            builder: (context, candidateData, rejectedData) {
-              // This is a transparent container that just detects drops.
-              return const SizedBox.expand();
-            },
-            onWillAcceptWithDetails: (details) {
-              final draggedItem = details.data.child;
-              if (draggedItem is _FolderListItem && draggedItem.folder.id == folderId) {
-                return false;
-              }
-              ref.read(hoveredFolderIdProvider.notifier).state = folderId;
-              return true;
-            },
-            onLeave: (data) {
-              ref.read(hoveredFolderIdProvider.notifier).state = null;
-            },
-            onAcceptWithDetails: (details) {
-              ref.read(hoveredFolderIdProvider.notifier).state = null;
-
-              final incomingItem = details.data;
-              dynamic draggedItemEntity;
-
-              if (incomingItem.child is _FolderListItem) {
-                draggedItemEntity = (incomingItem.child as _FolderListItem).folder;
-              } else if (incomingItem.child is _TemplateListItem) {
-                draggedItemEntity = (incomingItem.child as _TemplateListItem).template;
-              }
-
-              if (draggedItemEntity == null) return;
-
-              ref.read(templatesAndFoldersActionsProvider).moveItemToFolder(
-                    itemId: draggedItemEntity.id,
-                    isFolder: draggedItemEntity is Folder,
-                    sourceFolderId: currentFolderId,
-                    targetFolderId: folderId,
-                  );
-            },
-          ),
-        );
-      }).toList(),
+      },
     );
   }
 }
@@ -596,12 +687,16 @@ class _DragToParentNavBarState extends ConsumerState<_DragToParentNavBar> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final navigationStack = ref.watch(folderNavigationStackProvider);
-    final parentFolderId = navigationStack.length > 1 ? navigationStack[navigationStack.length - 2] : null;
+    final navigationStackAsync = ref.watch(folderNavigationStackProvider);
 
+    return navigationStackAsync.when(
+      loading: () => const SizedBox(height: 48.0), // Placeholder for loading state
+      error: (err, stack) => const SizedBox(height: 48.0, child: Center(child: Icon(Icons.error_outline, color: Colors.red))),
+      data: (navigationStack) {
+        final parentFolderId = navigationStack.length > 1 ? navigationStack[navigationStack.length - 2] : null;
 
-    return DragTarget<DragAndDropItem>(
-      builder: (context, candidateData, rejectedData) {
+        return DragTarget<DragAndDropItem>(
+          builder: (context, candidateData, rejectedData) {
         return Container(
           height: 48.0,
           decoration: BoxDecoration(
@@ -651,6 +746,8 @@ class _DragToParentNavBarState extends ConsumerState<_DragToParentNavBar> {
             );
       },
     );
+      },
+    );
   }
 }
 
@@ -661,7 +758,6 @@ class _BreadcrumbTrail extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final pathAsync = ref.watch(folderPathProvider);
-    final currentFolderId = ref.watch(currentFolderIdProvider);
     final theme = Theme.of(context);
 
     return pathAsync.when(
@@ -689,7 +785,7 @@ class _BreadcrumbTrail extends ConsumerWidget {
             final folder = path[index];
             final folderName = folder?.name ?? '根目录';
             final folderId = folder?.id;
-            final isCurrent = folderId == currentFolderId;
+            final isCurrent = folderId == path.last?.id;
 
             return InkWell(
               onTap: () {
@@ -743,7 +839,7 @@ class _EmptyState extends StatelessWidget {
 
 // --- Dialogs (保持不变) ---
 
-Future<void> _showCreateFolderDialog(BuildContext context, WidgetRef ref) async {
+Future<void> _showCreateFolderDialog(BuildContext context, WidgetRef ref, String? parentId) async {
   final controller = TextEditingController();
   final folderName = await showDialog<String>(
     context: context,
@@ -757,7 +853,7 @@ Future<void> _showCreateFolderDialog(BuildContext context, WidgetRef ref) async 
     ),
   );
   if (folderName != null && folderName.isNotEmpty) {
-    await ref.read(templatesAndFoldersActionsProvider).createFolder(folderName, parentId: ref.read(currentFolderIdProvider));
+    await ref.read(templatesAndFoldersActionsProvider).createFolder(folderName, parentId: parentId);
   }
 }
 

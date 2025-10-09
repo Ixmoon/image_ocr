@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'dart:isolate';
 import 'dart:ui';
@@ -31,6 +32,8 @@ const MethodChannel _screenshotMethodChannel = MethodChannel('com.lxmoon.image_o
 final templatesForProcessingProvider = StateProvider<List<Template>>((ref) => []);
 // 用于触发 UI 层的截屏请求
 final screenshotRequestedProvider = StateProvider<bool>((ref) => false);
+// 用于触发 UI 层的拍照请求, 使用 Completer 进行状态通知
+final takePictureRequestedProvider = StateProvider<Completer<void>?>((ref) => null);
 
 // --- [NEW] Provider to hold the state of the overlay for restoration ---
 class OverlayState {
@@ -60,11 +63,7 @@ Future<void> main() async {
   // 1. 确保Flutter绑定已初始化
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 2. 将非关键的清理任务移至后台执行，不阻塞启动
-  // Defer non-critical cleanup until after the first frame to improve startup time.
-  WidgetsBinding.instance.addPostFrameCallback((_) {
-    _clearSavedImages();
-  });
+  // 2. [REMOVED] The automatic cache clearing has been moved to a manual button.
 
   // 3. 并行初始化核心服务 (通知、数据库等)
   await Future.wait([
@@ -103,6 +102,7 @@ Future<void> _initHive() async {
     Hive.openBox<Folder>('folders'),
     Hive.openBox<Template>('templates'),
     Hive.openBox<TemplateField>('template_fields'),
+    Hive.openBox('app_state'), // --- [NEW] Box for persistent app state ---
   ]);
 }
 
@@ -113,35 +113,69 @@ void _setupIsolateCommunication(ProviderContainer container) {
   }
   IsolateNameServer.registerPortWithName(_port.sendPort, _kPortNameHome);
 
-  _port.listen((message) {
+  _port.listen((message) async {
     if (message is Map<String, dynamic>) {
       final command = message['command'] as String?;
       final payload = message['payload'] as Map<dynamic, dynamic>? ?? {};
-      final wasExpanded = payload['wasExpanded'] as bool? ?? false;
 
-      // Store the overlay's state for later restoration.
-      container.read(overlayStateToRestoreProvider.notifier).state = OverlayState(isExpanded: wasExpanded);
+      // --- [ROBUSTNESS FIX] Persist state updates to Hive ---
+      // This ensures that even if the app restarts, the last known state is saved.
+      if (payload.containsKey('isExpanded')) {
+        final isExpanded = payload['isExpanded'] as bool? ?? false;
+        container.read(overlayStateToRestoreProvider.notifier).state = OverlayState(isExpanded: isExpanded);
+        // Also write to persistent storage
+        await Hive.box('app_state').put('overlay_is_expanded', isExpanded);
+      } else if (payload.containsKey('wasExpanded')) {
+        final wasExpanded = payload['wasExpanded'] as bool? ?? false;
+        container.read(overlayStateToRestoreProvider.notifier).state = OverlayState(isExpanded: wasExpanded);
+        // We don't persist 'wasExpanded' as it's a temporary state for a single operation.
+        // Only 'isExpanded' from 'update_state' reflects the true current state.
+      }
+      
+      // --- Handle command logic ---
+      switch (command) {
+        case 'request_screenshot_and_process':
+        case 'request_screenshot_only':
+          if (command == 'request_screenshot_and_process') {
+            final templateList = (payload['templates'] as List? ?? []).cast<Map<dynamic, dynamic>>();
+            final templatesBox = Hive.box<Template>('templates');
+            final templateIds = templateList.map((t) => t['templateId'] as String);
+            final matchingTemplates = templateIds
+                .map((id) => templatesBox.get(id))
+                .where((template) => template != null)
+                .cast<Template>()
+                .toList();
+            container.read(templatesForProcessingProvider.notifier).state = matchingTemplates;
+          } else {
+            container.read(templatesForProcessingProvider.notifier).state = [];
+          }
+          _screenshotMethodChannel.invokeMethod('takeScreenshot');
+          break;
 
-      if (command == 'request_screenshot_and_process' || command == 'request_screenshot_only') {
-        if (command == 'request_screenshot_and_process') {
-          final templateList = (payload['templates'] as List? ?? []).cast<Map<dynamic, dynamic>>();
-          final templatesBox = Hive.box<Template>('templates');
-          final templateIds = templateList.map((t) => t['templateId'] as String);
-          final matchingTemplates = templateIds
-              .map((id) => templatesBox.get(id))
-              .where((template) => template != null)
-              .cast<Template>()
-              .toList();
-          container.read(templatesForProcessingProvider.notifier).state = matchingTemplates;
-        } else {
-          container.read(templatesForProcessingProvider.notifier).state = [];
-        }
-        
-        // Directly trigger the screenshot from here.
-        _screenshotMethodChannel.invokeMethod('takeScreenshot');
-      } else if (command == 'trigger_screenshot_direct') {
-        // 悬浮窗直接触发截屏的请求
-        _screenshotMethodChannel.invokeMethod('takeScreenshot');
+        case 'request_take_picture':
+          final completer = Completer<void>();
+          container.read(takePictureRequestedProvider.notifier).state = completer;
+          try {
+            await completer.future;
+          } finally {
+            _notifyOverlayScreenshotDone(container);
+          }
+          break;
+
+        case 'ping':
+          final overlayPort = IsolateNameServer.lookupPortByName('OVERLAY');
+          overlayPort?.send({'command': 'pong'});
+          break;
+
+        // The 'update_state' command is now handled by the defensive check above,
+        // so no explicit case is needed here unless it had other logic.
+        case 'update_state':
+          break;
+
+        // This command is not currently sent by the overlay, but keeping for safety.
+        case 'trigger_screenshot_direct':
+          _screenshotMethodChannel.invokeMethod('takeScreenshot');
+          break;
       }
     }
   });
@@ -381,6 +415,7 @@ void overlayMain() async {
   await Hive.openBox<Folder>('folders');
   await Hive.openBox<Template>('templates');
   await Hive.openBox<TemplateField>('template_fields');
+  await Hive.openBox('app_state'); // --- [FIX] Ensure the state box is open for the overlay isolate ---
   
   runApp(
     const ProviderScope(
@@ -404,35 +439,5 @@ class MyApp extends ConsumerWidget {
       routerConfig: router,
       debugShowCheckedModeBanner: false,
     );
-  }
-}
-
-/// 清理应用在公共相册中创建的图片文件夹
-Future<void> _clearSavedImages() async {
-  try {
-    // 首先检查权限状态
-    var status = await Permission.manageExternalStorage.status;
-
-    // 如果权限未被授予，则请求它。这将引导用户到系统设置页面。
-    if (!status.isGranted) {
-      status = await Permission.manageExternalStorage.request();
-    }
-
-    // 在用户从设置页面返回后，如果权限已授予，则执行清理操作
-    if (status.isGranted) {
-      // Get the directory path from the native side to ensure consistency
-      final String? dirPath = await _screenshotMethodChannel.invokeMethod('getPicturesDirectory');
-      if (dirPath != null) {
-        final saveDir = Directory(dirPath);
-        if (await saveDir.exists()) {
-          await saveDir.delete(recursive: true);
-        }
-        // Always ensure the directory exists
-        await saveDir.create(recursive: true);
-      }
-    }
-  } catch (e) {
-    // 记录错误，但不应让它使应用崩溃
-    debugPrint("Error in _clearSavedImages: $e");
   }
 }

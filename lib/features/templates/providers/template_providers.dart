@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_ocr/features/templates/models/folder.dart';
 import 'package:image_ocr/features/templates/models/template.dart';
 import 'package:image_ocr/features/templates/services/template_service.dart' as template_service_lib;
@@ -20,24 +21,53 @@ class TemplateService extends _$TemplateService {
   }
 }
 
-@riverpod
-class FolderNavigationStack extends _$FolderNavigationStack {
-  @override
-  List<String?> build() => [null]; // Start at the root
+const String _navigationStackKey = 'folderNavigationStack';
 
-  void push(String folderId) {
-    state = [...state, folderId];
+@Riverpod(keepAlive: true)
+class FolderNavigationStack extends _$FolderNavigationStack {
+  
+  Future<SharedPreferences> _getPrefs() async => await SharedPreferences.getInstance();
+
+  @override
+  Future<List<String?>> build() async {
+    final prefs = await _getPrefs();
+    final storedStack = prefs.getStringList(_navigationStackKey);
+    if (storedStack != null && storedStack.isNotEmpty) {
+      // SharedPreferences doesn't support nulls in lists, so we use a placeholder
+      return storedStack.map((id) => id == 'null' ? null : id).toList();
+    }
+    return [null]; // Default to root
   }
 
-  void pop() {
-    if (state.length > 1) {
-      state = state.sublist(0, state.length - 1);
+  Future<void> _saveStack(List<String?> stack) async {
+    final prefs = await _getPrefs();
+    // SharedPreferences doesn't support nulls in lists, so we use a placeholder
+    final storableStack = stack.map((id) => id ?? 'null').toList();
+    await prefs.setStringList(_navigationStackKey, storableStack);
+  }
+
+  Future<void> push(String folderId) async {
+    final currentStack = state.valueOrNull ?? [null];
+    final newStack = [...currentStack, folderId];
+    state = AsyncData(newStack);
+    await _saveStack(newStack);
+  }
+
+  Future<void> pop() async {
+    final currentStack = state.valueOrNull ?? [null];
+    if (currentStack.length > 1) {
+      final newStack = currentStack.sublist(0, currentStack.length - 1);
+      state = AsyncData(newStack);
+      await _saveStack(newStack);
     }
   }
 
-  void popTo(int index) {
-    if (index >= 0 && index < state.length) {
-      state = state.sublist(0, index + 1);
+  Future<void> popTo(int index) async {
+    final currentStack = state.valueOrNull ?? [null];
+    if (index >= 0 && index < currentStack.length) {
+      final newStack = currentStack.sublist(0, index + 1);
+      state = AsyncData(newStack);
+      await _saveStack(newStack);
     }
   }
 }
@@ -46,7 +76,12 @@ class FolderNavigationStack extends _$FolderNavigationStack {
 class CurrentFolderId extends _$CurrentFolderId {
   @override
   String? build() {
-    return ref.watch(folderNavigationStackProvider).last;
+    // Now depends on the async navigation stack
+    return ref.watch(folderNavigationStackProvider).when(
+      data: (stack) => stack.last,
+      loading: () => null, // Or a specific loading state if needed
+      error: (_, __) => null, // Handle error case
+    );
   }
 }
 
@@ -89,18 +124,26 @@ class FolderPath extends _$FolderPath {
   @override
   Future<List<Folder?>> build() async {
     final service = await ref.watch(templateServiceProvider.future);
-    final stack = ref.watch(folderNavigationStackProvider);
-    final allFolders = service.getFolders();
+    // Now depends on the async navigation stack
+    final stackAsync = ref.watch(folderNavigationStackProvider);
 
-    return stack.map((id) {
-      if (id == null) return null; // Represents the "Root"
-      try {
-        return allFolders.firstWhere((f) => f.id == id);
-      } catch (e) {
-        // This can happen if a folder in the stack was deleted.
-        return Folder(id: id, name: '未知'); // Return a placeholder
-      }
-    }).toList();
+    return await stackAsync.when(
+      data: (stack) {
+        final allFolders = service.getFolders();
+        return stack.map((id) {
+          if (id == null) return null; // Represents the "Root"
+          try {
+            return allFolders.firstWhere((f) => f.id == id);
+          } catch (e) {
+            // This can happen if a folder in the stack was deleted.
+            return Folder(id: id, name: '未知'); // Return a placeholder
+          }
+        }).toList();
+      },
+      // Return empty list while loading or on error
+      loading: () async => [],
+      error: (_, __) async => [],
+    );
   }
 }
 

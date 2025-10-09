@@ -24,12 +24,12 @@ final templateServiceProvider = AutoDisposeAsyncNotifierProvider<
 typedef _$TemplateService
     = AutoDisposeAsyncNotifier<template_service_lib.TemplateService>;
 String _$folderNavigationStackHash() =>
-    r'fc9f47a7a42b293dcdf20cb64e55bba7139facc5';
+    r'0400154adae7575bbc48f03bb909dd07480ac5cf';
 
 /// See also [FolderNavigationStack].
 @ProviderFor(FolderNavigationStack)
 final folderNavigationStackProvider =
-    AutoDisposeNotifierProvider<FolderNavigationStack, List<String?>>.internal(
+    AsyncNotifierProvider<FolderNavigationStack, List<String?>>.internal(
   FolderNavigationStack.new,
   name: r'folderNavigationStackProvider',
   debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
@@ -39,8 +39,8 @@ final folderNavigationStackProvider =
   allTransitiveDependencies: null,
 );
 
-typedef _$FolderNavigationStack = AutoDisposeNotifier<List<String?>>;
-String _$currentFolderIdHash() => r'36858449ad22ef258ff51d93c6cd9a041f9e59a7';
+typedef _$FolderNavigationStack = AsyncNotifier<List<String?>>;
+String _$currentFolderIdHash() => r'aef559d6b1f01cbef186a6afc2239201f215a044';
 
 /// See also [CurrentFolderId].
 @ProviderFor(CurrentFolderId)
@@ -221,7 +221,7 @@ class _FolderContentsProviderElement
   String? get folderId => (origin as FolderContentsProvider).folderId;
 }
 
-String _$folderPathHash() => r'6b4e0213870a31e656247aaf4a090b84bb3d7a71';
+String _$folderPathHash() => r'22736ebe6fce56cf9691c091712899bae4114dbe';
 
 /// See also [FolderPath].
 @ProviderFor(FolderPath)
