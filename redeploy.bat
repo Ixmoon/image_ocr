@@ -19,7 +19,7 @@ REM ============================================================================
 REM --- 配置变量 ---
 SET KEYSTORE_FILE=keystore.jks
 SET WORKFLOW_FILE=release.yml
-SET TARGET_BRANCH=beta
+SET TARGET_BRANCH=main
 
 REM --- 1. 检查 gh-cli 登录状态 ---
 echo 正在检查 GitHub CLI 登录状态...

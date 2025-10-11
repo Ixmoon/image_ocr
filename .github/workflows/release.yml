@@ -3,16 +3,10 @@
 name: Release Flutter App
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: '版本号 (例如: 1.0.0)'
-        required: true
-        default: '1.0.0'
-      changelog:
-        description: '更新日志'
-        required: true
-        default: '常规更新。'
+  push:
+    branches:
+      - main
+      - beta
 
 jobs:
   # --- Job 1: 构建 Android APK ---
@@ -61,25 +55,49 @@ jobs:
           name: android-apk
           path: build/app/outputs/flutter-apk/app-release-arm64.apk
 
-  # --- Job 3: 创建 Release 并上传所有产物 ---
+  # --- Job 2: 创建 Release 并上传所有产物 ---
   create-release:
     runs-on: ubuntu-latest
-    needs: [build-android]
+    needs: [build-android] # 依赖前两个任务
     permissions:
       contents: write # 授予 GITHUB_TOKEN 写权限以创建 Release
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required to get all tags
+
+      - name: Get latest tag and generate new version
+        id: tag_version
+        run: |
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          clean_tag=${latest_tag#v}
+          IFS='.' read -r -a version_parts <<< "$clean_tag"
+          major=${version_parts[0]:-0}
+          minor=${version_parts[1]:-0}
+          patch=${version_parts[2]:-0}
+          new_patch=$((patch + 1))
+          new_version="v$major.$minor.$new_patch"
+          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          echo "changelog_body<<EOF" >> $GITHUB_OUTPUT
+          git log -1 --pretty=%B >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Download Android APK
         uses: actions/download-artifact@v4
         with:
           name: android-apk
           path: artifacts/android
 
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}
-          name: Release v${{ github.event.inputs.version }}
-          body: ${{ github.event.inputs.changelog }}
+          tag_name: ${{ steps.tag_version.outputs.new_version }}
+          name: Release ${{ steps.tag_version.outputs.new_version }}
+          body: ${{ steps.changelog.outputs.changelog_body }}
           files: |
             artifacts/android/app-release-arm64.apk
