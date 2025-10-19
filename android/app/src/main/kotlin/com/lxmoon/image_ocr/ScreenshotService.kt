@@ -60,7 +60,7 @@ class ScreenshotService : AccessibilityService() {
         super.onServiceConnected()
 
         // Ensure the Flutter engine is ready before the service starts its work.
-        (application as MainApplication).getFlutterEngine(this)
+        (application as MainApplication).getFlutterEngine(this, false) // Pass false for Service
         
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         sharedPreferences = getSharedPreferences("screenshot_service_prefs", Context.MODE_PRIVATE)

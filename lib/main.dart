@@ -424,6 +424,22 @@ void overlayMain() async {
   );
 }
 
+// --- [NEW] Background Service Entry Point ---
+@pragma("vm:entry-point")
+void backgroundMain() {
+  // This entry point is specifically for the background service.
+  // It should only initialize what's absolutely necessary for background processing.
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // We need a ProviderContainer to listen for screenshot events.
+  final container = ProviderContainer();
+  
+  // Setup the screenshot listener which is the core job of this isolate.
+  _setupScreenshotListener(container);
+  
+  // No UI should be run here. This isolate just listens for platform channel events.
+}
+
 class MyApp extends ConsumerWidget {
   const MyApp({super.key});
 
