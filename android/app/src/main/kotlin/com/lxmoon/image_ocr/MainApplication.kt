@@ -10,7 +10,6 @@ import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.FlutterInjector
 import java.io.File
 
 class MainApplication : Application() {
@@ -41,22 +40,15 @@ class MainApplication : Application() {
      * This method is synchronized to be thread-safe.
      */
     @Synchronized
-    fun getFlutterEngine(context: Context, isMainActivity: Boolean): FlutterEngine {
+    fun getFlutterEngine(context: Context): FlutterEngine {
         if (flutterEngine == null) {
             // Create a new FlutterEngine.
             flutterEngine = FlutterEngine(context.applicationContext)
 
-            // Determine which Dart entrypoint to use
-            val entrypoint = if (isMainActivity) {
+            // Start executing Dart code to pre-warm the engine.
+            flutterEngine!!.dartExecutor.executeDartEntrypoint(
                 DartExecutor.DartEntrypoint.createDefault()
-            } else {
-                DartExecutor.DartEntrypoint(
-                    FlutterInjector.instance().flutterLoader().findAppBundlePath(), "backgroundMain"
-                )
-            }
-
-            // Start executing the chosen Dart code.
-            flutterEngine!!.dartExecutor.executeDartEntrypoint(entrypoint)
+            )
 
             // Cache the FlutterEngine to be used by other components.
             FlutterEngineCache

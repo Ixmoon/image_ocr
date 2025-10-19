@@ -31,7 +31,7 @@ class MainActivity: FlutterFragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Ensure the engine is initialized before the activity is created.
-        (application as MainApplication).getFlutterEngine(this, true) // Pass true for MainActivity
+        (application as MainApplication).getFlutterEngine(this)
         super.onCreate(savedInstanceState)
         instance = this
         checkAndRequestNotificationPermission()
